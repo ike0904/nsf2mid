@@ -17,9 +17,10 @@ Usage:
   v0.1.3 (2026-10-04) - ループ確定を 3 回連続一致に変更 (2 ループ後にサビが入る曲への対策)・三角波を 1 オクターブ下げて出力 (--tri-octave)
   v0.1.4 (2026-10-04) - 三角波のオクターブを元に戻す (--tri-octave 既定 0)
   v0.1.5 (2026-10-04) - 三角波の GM 音色を 38→80 (Sibelius での移調表示・トラック並べ替え対策)・--programs
+  v0.1.6 (2026-10-04) - トラック名を楽器名と紛らわしくない名前に変更 (Sibelius が Triangle を打楽器と判定)
 """
 
-APP_VERSION = "v0.1.5"
+APP_VERSION = "v0.1.6"
 
 import argparse
 import csv
@@ -211,8 +212,10 @@ def vol_to_velocity(v):
     return max(1, min(127, int(round(v * 127 / 15))))
 
 
-TRACK_NAMES = {"P1": "Pulse 1", "P2": "Pulse 2", "TRI": "Triangle"}
-DRUM_TRACKS = (("NOI", "Drums (noise)"), ("DMC", "Drums (DPCM)"), ("TRI", "Drums (triangle)"))
+# Track names avoid real instrument names: notation software (Sibelius) picks instruments from the
+# track name, and "Triangle" became the percussion triangle (moved into the percussion section).
+TRACK_NAMES = {"P1": "Ch1 Pulse", "P2": "Ch2 Pulse", "TRI": "Ch3 Wave"}
+DRUM_TRACKS = (("NOI", "Ch4 Noise drums"), ("DMC", "Ch5 DPCM drums"), ("TRI", "Ch3 Wave drums"))
 
 
 def build_midi(notes, drums, tmap, title, track_no, end_frame, loop, transpose, programs):

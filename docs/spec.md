@@ -62,11 +62,14 @@ python src/nsf2mid.py FILE.nsf [-t TRACK] [-s SECONDS] [-o OUTDIR] [--info] [--d
 
 | ファイル | 内容 |
 |:---|:---|
-| `*.mid` | MIDI（Track0: テンポマップ・4/4・ループマーカー、Track1-3: Pulse1 / Pulse2 / Triangle（ch 1-3）、ドラムトラック: noise / DPCM / triangle（ch 10、ヒットがある場合のみ）） |
+| `*.mid` | MIDI（Track0: テンポマップ・4/4・ループマーカー、Track1-3: Ch1 Pulse / Ch2 Pulse / Ch3 Wave（ch 1-3）、ドラムトラック: noise / DPCM / triangle（ch 10、ヒットがある場合のみ）） |
 
 ※ 音程トラックは既定ですべて GM 80（Square Lead）。楽譜ソフト（Sibelius）は音色番号から楽器を決め、
   楽器の種類順にトラックを並べ替える。また 38（Synth Bass）はベース＝1 オクターブ上に記譜する移調楽器として
   扱われ、三角波が 1 オクターブ高く表示されていた（v0.1.4 まで）。
+※ トラック名は Ch1 Pulse / Ch2 Pulse / Ch3 Wave / Ch4 Noise drums / Ch5 DPCM drums / Ch3 Wave drums。
+  Sibelius はトラック名からも楽器を判定し、「Triangle」を打楽器のトライアングルとして打楽器セクションへ移していた（v0.1.5 まで）。
+  Sibelius はスコア順（打楽器 → 鍵盤・シンセ …）に並べるため、ドラムトラックは上に来る。
 | `*_notes.csv` | 抽出ノート・ドラム一覧（開始/ゲート終了/終了フレーム・余韻長・音名/ドラム名・ピーク音量・開始要因/分類根拠・ティック・音量推移） |
 | `*_writes.csv` | （`--dump`）全 APU レジスタ書き込み |
 | `*_frames.csv` | （`--dump`）フレーム末尾時点の各チャンネル状態 |
