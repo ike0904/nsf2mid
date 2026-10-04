@@ -21,9 +21,10 @@ Usage:
   v0.1.7 (2026-10-04) - 音色 (プログラムチェンジ) を既定で出力しない
   v0.1.8 (2026-10-04) - トレモロ後の持続音を余韻と誤判定しない (オホーツクに消ゆ 1ch が短すぎた)
   v0.1.9 (2026-10-04) - 冒頭の空白を保持・ベースラインからの拍判定 (マリオUSA 地上: 200 BPM、3 連 2 個分の休符)
+  v0.1.10 (2026-10-04) - シャッフル (長短 2:1 の交互) 検出 (マリオ3: 200 BPM 3 連)・ベースライン拍判定は廃止
 """
 
-APP_VERSION = "v0.1.9"
+APP_VERSION = "v0.1.10"
 
 import argparse
 import csv
@@ -429,19 +430,17 @@ def main():
 
     onsets = [o for o in tempo_onsets(notes, frames) if o < end_frame]
     onsets += [d.start for d in in_range if d.src == "DMC"]
-    bass = [n.start for n in notes["TRI"] if n.start < end_frame]
-    tempo = detect_tempo_map(onsets, frame_rate, args.rows_per_beat, args.unit, bass)
+    tempo = detect_tempo_map(onsets, frame_rate, args.rows_per_beat, args.unit)
     tmap = None
     if tempo is None:
         print("\nTempo: not enough notes to detect")
     else:
         g = tempo["global"]
         print(f"\nTempo: grid unit {g['unit']:g} frames (fit {g['score'] * 100:.1f}%), "
-              f"{'ternary (triplet/shuffle)' if tempo['ternary'] else 'binary'}")
+              f"{'shuffle (long-short on a straight grid)' if tempo.get('shuffle') else 'ternary (triplet/shuffle)' if tempo['ternary'] else 'binary'}")
         for sg in tempo["segments"]:
             print(f"  from {sg.start / frame_rate:7.2f} s: {sg.bpm:7.2f} BPM  "
-                  f"(unit {sg.unit:.4g} frames x {sg.rows} rows/beat, fit {sg.score * 100:.1f}%)"
-                  + ("  [beat from bass line]" if sg.bass_beat else ""))
+                  f"(unit {sg.unit:.4g} frames x {sg.rows} rows/beat, fit {sg.score * 100:.1f}%)")
             if sg.score < 0.8:
                 print("    Warning: poor grid fit (rubato or unsupported rhythm?)")
         tmap = TickMap(tempo, PPQ, not args.no_quantize)

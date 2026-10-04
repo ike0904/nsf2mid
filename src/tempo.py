@@ -108,6 +108,33 @@ def is_ternary(onsets, unit):
     return div3 / len(iois) > 0.5
 
 
+SHUFFLE_PAIRS = 0.45   # share of consecutive interval pairs that are long-short (2:1) or short-long
+
+
+def shuffle_step(onsets, unit):
+    """Shuffle / swing written on a straight grid: consecutive intervals alternate
+    long-short in a 2:1 ratio (2s, s). Returns s (in grid units) or None.
+
+    Examples: Super Mario Bros. 3 - grid 6 frames, intervals 12,6,12,6 (s = 1 unit, 86 % of
+    the pairs); Super Mario USA - grid 2 frames, intervals 12,6 (s = 3 units, 54 %).
+    Plain runs of equal notes, dotted rhythms (3:1) or 8th+16th figures do not qualify.
+    """
+    onsets = sorted(set(onsets))
+    if len(onsets) < 16:
+        return None
+    iois = [round((b - a) / unit) for a, b in zip(onsets, onsets[1:])]
+    pairs = list(zip(iois, iois[1:]))
+    if not pairs:
+        return None
+    best, best_s = 0.0, None
+    for step in range(1, 13):
+        hit = sum(1 for a, b in pairs if (a, b) in ((2 * step, step), (step, 2 * step)))
+        share = hit / len(pairs)
+        if share > best:
+            best, best_s = share, step
+    return best_s if best >= SHUFFLE_PAIRS else None
+
+
 def choose_rows(unit, frame_rate, ternary, prefer_bpm=None):
     family = (12, 6, 3, 24) if ternary else (4, 2, 8, 16)
     if prefer_bpm:
@@ -140,37 +167,6 @@ def beat_fit(onsets, period, tol=0.75):
     return (score - chance) / (1 - chance), score, best[1]
 
 
-BASS_SWITCH_FIT = 0.85    # bass fits an alternative beat at least this well ...
-BASS_KEEP_FIT = 0.6       # ... while it fits the default beat worse than this
-BASS_MIN_NOTES = 12
-
-
-def bass_beat(bass, unit, rows, frame_rate):
-    """Alternative rows-per-beat suggested by the bass line, or None.
-
-    Example: Super Mario USA overworld - grid unit 2 frames; the default ternary choice is
-    12 rows (24 frames, 150 BPM) but the triangle bass sits on an 18-frame beat (200 BPM)
-    with the melody on triplets (6 frames) in between.
-    """
-    if len(bass) < BASS_MIN_NOTES:
-        return None
-    cur = beat_fit(bass, unit * rows)[1]
-    if cur >= BASS_KEEP_FIT:
-        return None
-    best = None
-    m = 1
-    while True:
-        bpm = 60.0 * frame_rate / (unit * m)
-        if bpm < BPM_LO:
-            break
-        if bpm < 240.0:
-            sc = beat_fit(bass, unit * m)[1]
-            if sc >= BASS_SWITCH_FIT:
-                best = m            # keep the largest qualifying beat (slowest tempo)
-        m += 1
-    return best
-
-
 class Segment:
     def __init__(self, start, unit, phase, score):
         self.start = start      # first onset frame belonging to the segment
@@ -179,13 +175,12 @@ class Segment:
         self.score = score
         self.rows = 4
         self.bpm = 0.0
-        self.bass_beat = False
 
     def __repr__(self):
         return f"Segment(start={self.start}, unit={self.unit:.4g}, bpm={self.bpm:.2f}, fit={self.score:.2f})"
 
 
-def detect_tempo_map(onsets, frame_rate, rows_per_beat=None, unit=None, bass=None):
+def detect_tempo_map(onsets, frame_rate, rows_per_beat=None, unit=None):
     onsets = sorted(set(onsets))
     if len(onsets) < 4:
         return None
@@ -197,21 +192,22 @@ def detect_tempo_map(onsets, frame_rate, rows_per_beat=None, unit=None, bass=Non
         g = detect_grid(onsets)
         segs = _segment(onsets, frame_rate, g)
     ternary = is_ternary(onsets, g["unit"])
+    step = None if rows_per_beat else shuffle_step(onsets, g["unit"])
+    shuffle = step is not None
+    if shuffle:
+        ternary = True
     prev = None
     for s in segs:
         if rows_per_beat:
             s.rows = rows_per_beat
+        elif shuffle and prev is None:
+            # 1 beat = one long-short pair (2s + s); double it if that would exceed 240 BPM
+            s.rows = 3 * step if 60.0 * frame_rate / (s.unit * 3 * step) < 240.0 else 6 * step
         else:
             s.rows = choose_rows(s.unit, frame_rate, ternary, prev)
-            if bass:
-                nxt = segs[segs.index(s) + 1].start if s is not segs[-1] else float("inf")
-                alt = bass_beat([b for b in bass if s.start <= b < nxt], s.unit, s.rows, frame_rate)
-                if alt:
-                    s.rows = alt
-                    s.bass_beat = True
         s.bpm = 60.0 * frame_rate / (s.unit * s.rows)
         prev = s.bpm
-    return {"global": g, "segments": segs, "ternary": ternary}
+    return {"global": g, "segments": segs, "ternary": ternary, "shuffle": shuffle}
 
 
 def _segment(onsets, frame_rate, g):
