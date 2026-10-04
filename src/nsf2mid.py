@@ -3,17 +3,20 @@ nsf2mid - NSF to MIDI converter (derived from morokoshi)
 
 Phase 1: 6502 emulation + APU register log / per-frame channel state dump.
 Phase 2: note extraction (P1/P2/TRI), tempo detection, quantized MIDI output.
+Phase 3: drums (noise / DPCM / triangle glides -> GM percussion), loop / end detection.
 
 Usage:
     python nsf2mid.py FILE.nsf [-t TRACK] [-s SECONDS] [-o OUTDIR] [--info] [--dump]
                       [--keep-tail] [--no-quantize] [--unit FRAMES] [--rows-per-beat N]
+                      [--loops N] [--no-loop] [--no-tri-drums] [--drum-map MAP]
 
 バージョン履歴:
   v0.1.0 (2026-10-04) - 初版 (Phase 1: 6502 エミュレータ・APU レジスタログ・フレーム状態ダンプ)
   v0.1.1 (2026-10-04) - $4015 読み出し対応 (オホーツクに消ゆ等)・Phase 2: ノート抽出・テンポ検出・MIDI 出力
+  v0.1.2 (2026-10-04) - Phase 3: ノイズ/DPCM/三角波ドラム・ループ/曲終端検出・分割エミュレーション
 """
 
-APP_VERSION = "v0.1.1"
+APP_VERSION = "v0.1.2"
 
 import argparse
 import csv
@@ -28,10 +31,16 @@ from apu_state import APUState, note_name  # noqa: E402
 from notes import extract_notes, tempo_onsets  # noqa: E402
 from tempo import detect_tempo_map, TickMap  # noqa: E402
 from midi import Track, write_smf  # noqa: E402
+from drums import (noise_hits, dmc_hits, split_triangle_drums, parse_drum_map,  # noqa: E402
+                   summarize, GM_NAMES)
+from loop import detect_loop  # noqa: E402
 
 PPQ = 480
 MIDI_CH = {"P1": 0, "P2": 1, "TRI": 2}
 MIDI_PROG = {"P1": 80, "P2": 80, "TRI": 38}   # GM: Lead 1 (square), Synth Bass 1
+CHUNK_SEC = 60.0      # emulate in chunks; stop when a loop or the end of the song is found
+SILENCE_SEC = 4.0     # this much silence after the last note = song ended
+CONFIRM_SEC = 20.0    # repeats needed after the first loop before a loop is accepted
 
 REG_NAMES = {
     0x4000: "P1_CTRL", 0x4001: "P1_SWEEP", 0x4002: "P1_LO", 0x4003: "P1_HI",
@@ -196,49 +205,98 @@ def vol_to_velocity(v):
     return max(1, min(127, int(round(v * 127 / 15))))
 
 
-def build_midi(notes, tmap, title, track_no):
+TRACK_NAMES = {"P1": "Pulse 1", "P2": "Pulse 2", "TRI": "Triangle"}
+DRUM_TRACKS = (("NOI", "Drums (noise)"), ("DMC", "Drums (DPCM)"), ("TRI", "Drums (triangle)"))
+
+
+def build_midi(notes, drums, tmap, title, track_no, end_frame, loop):
     t0 = Track(f"{title} #{track_no}" if title else f"track {track_no}")
     for tick, bpm in tmap.tempo_events():
         t0.tempo(tick, bpm)
     t0.time_signature(0, 4, 2)
+    if loop:
+        t0.meta(tmap(loop["start"]), 0x06, b"loopStart")
+        t0.meta(tmap(loop["start"] + loop["period"]), 0x06, b"loopEnd")
     tracks = [t0]
+    min_len = int(tmap.min_ticks) if tmap.quantize else max(1, int(tmap.min_ticks / 4))
+    end_tick = tmap(end_frame)
+
+    def span(start, stop):
+        st = tmap(start)
+        en = min(tmap(stop), end_tick)
+        if en <= st:
+            en = st + min_len
+        return st, en
+
     for ch in ("P1", "P2", "TRI"):
-        tr = Track({"P1": "Pulse 1", "P2": "Pulse 2", "TRI": "Triangle"}[ch])
+        tr = Track(TRACK_NAMES[ch])
         mch = MIDI_CH[ch]
         tr.program(0, mch, MIDI_PROG[ch])
+        if loop and ch == "P1":
+            tr.control(tmap(loop["start"]), mch, 111, 0)   # RPG Maker style loop marker
         for n in notes[ch]:
-            st = tmap(n.start)
-            en = tmap(n.gate_end)
-            if en <= st:
-                en = st + (int(tmap.min_ticks) if tmap.quantize else max(1, int(tmap.min_ticks / 4)))
+            if n.start >= end_frame:
+                continue
+            st, en = span(n.start, n.gate_end)
             vel = 100 if ch == "TRI" else vol_to_velocity(n.peak)
             tr.note(st, en, mch, n.pitch, vel)
+        tracks.append(tr)
+    for src, name in DRUM_TRACKS:
+        hits = [d for d in drums if d.src == src and d.start < end_frame]
+        if not hits:
+            continue
+        tr = Track(name)
+        for d in hits:
+            st, en = span(d.start, d.end)
+            tr.note(st, en, 9, d.gm, d.vel)
         tracks.append(tr)
     return tracks
 
 
-def write_notes_csv(path, notes, tmap):
+def write_notes_csv(path, notes, drums, tmap):
     rows = []
     for ch, lst in notes.items():
         for n in lst:
             rows.append((n.start, ch, n))
+    for d in drums:
+        rows.append((d.start, "DRUM_" + d.src, d))
     rows.sort(key=lambda r: (r[0], r[1]))
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["ch", "start_frame", "gate_end_frame", "end_frame", "gate_frames", "tail_frames",
                     "note", "midi", "peak_vol", "cue", "start_tick", "end_tick", "vols"])
         for _, ch, n in rows:
+            if ch.startswith("DRUM_"):
+                w.writerow([ch, n.start, n.end, n.end, n.end - n.start, 0,
+                            GM_NAMES.get(n.gm, str(n.gm)), n.gm, n.vel, n.info,
+                            tmap(n.start) if tmap else "", tmap(n.end) if tmap else "", ""])
+                continue
             w.writerow([ch, n.start, n.gate_end, n.end, n.gate_end - n.start, n.end - n.gate_end,
                         note_name(n.pitch), n.pitch, n.peak, n.cue,
                         tmap(n.start) if tmap else "", tmap(n.gate_end) if tmap else "",
                         " ".join(f"{v:X}" for v in n.vols[:48])])
 
 
+def analyze(player, n_frames, args, drum_map):
+    """Replay the register log and extract notes / drums / loop."""
+    frames = build_frames(player.writes, n_frames, player.frame_cycles, player.cpu_hz)
+    notes, stats = extract_notes(frames, keep_tail=args.keep_tail)
+    notes["TRI"], tri_drums = split_triangle_drums(notes["TRI"], not args.no_tri_drums)
+    drums = noise_hits(frames, drum_map) + dmc_hits(frames, player.dmc_samples, player.cpu_hz, drum_map)
+    drums += tri_drums
+    drums.sort(key=lambda d: d.start)
+    events = {ch: [(n.start, n.pitch) for n in lst] for ch, lst in notes.items()}
+    events["DRUM"] = [(d.start, (d.src, d.kind)) for d in drums]
+    loop = None if args.no_loop else detect_loop(events)
+    return frames, notes, stats, drums, events, loop
+
+
 def main():
     ap = argparse.ArgumentParser(description=f"nsf2mid {APP_VERSION} - NSF to MIDI converter")
     ap.add_argument("nsf", help="input .nsf file")
     ap.add_argument("-t", "--track", type=int, default=0, help="track number (1-based, default: start song)")
-    ap.add_argument("-s", "--seconds", type=float, default=120.0, help="length to emulate in seconds")
+    ap.add_argument("-s", "--seconds", type=float, default=600.0,
+                    help="maximum length to emulate in seconds (stops early when a loop or the end is found)")
     ap.add_argument("-o", "--outdir", default=None, help="output folder (default: <nsf folder>/nsf2mid_out)")
     ap.add_argument("--info", action="store_true", help="print header info only")
     ap.add_argument("--dump", action="store_true", help="also write register/frame/tracker dumps (Phase 1)")
@@ -246,7 +304,14 @@ def main():
     ap.add_argument("--no-quantize", action="store_true", help="do not snap notes to the detected grid")
     ap.add_argument("--unit", type=float, default=None, help="override grid unit (frames per row)")
     ap.add_argument("--rows-per-beat", type=int, default=None, help="override rows per beat (e.g. 4 = 16th rows)")
+    ap.add_argument("--loops", type=int, default=1, help="how many times to write the loop body (default 1)")
+    ap.add_argument("--no-loop", action="store_true", help="disable loop detection (emulate --seconds fully)")
+    ap.add_argument("--no-tri-drums", action="store_true", help="keep triangle glide drums as triangle notes")
+    ap.add_argument("--drum-map", default="",
+                    help='override drum notes, e.g. "3:0=42,12:0=36,DMC:E000:129:15=38" '
+                         "(noise: periodIdx:mode, DPCM: DMC:addrHex:len:rate)")
     args = ap.parse_args()
+    drum_map = parse_drum_map(args.drum_map)
 
     player = NSFPlayer(args.nsf)
     h = player.header
@@ -261,17 +326,49 @@ def main():
         return 1
 
     frame_rate = player.cpu_hz / player.frame_cycles
-    n_frames = int(args.seconds * frame_rate)
-    print(f"\nEmulating track {track}: {n_frames} frames ({args.seconds:.1f} s @ {frame_rate:.3f} Hz)")
+    max_frames = int(args.seconds * frame_rate)
+    chunk = int(CHUNK_SEC * frame_rate)
+    print(f"\nEmulating track {track} (max {args.seconds:.0f} s @ {frame_rate:.3f} Hz)")
     t0 = time.time()
-    writes = player.run(track, n_frames)
-    t1 = time.time()
-    print(f"  CPU emulation: {t1 - t0:.2f} s, {len(writes)} register writes")
+    player.start(track)
+    n_frames = 0
+    end_reason = "max length"
+    prev_loop = None
+    while n_frames < max_frames:
+        n_frames = player.advance(min(chunk, max_frames - n_frames))
+        if args.no_loop or player.aborted:
+            if player.aborted:
+                end_reason = "emulation aborted"
+            if player.aborted:
+                break
+            continue
+        frames, notes, stats, drums, events, loop = analyze(player, n_frames, args, drum_map)
+        # accept a loop only when it is stable over two chunks and confirmed by enough repeats
+        if loop and prev_loop and abs(loop["start"] - prev_loop["start"]) <= 2                 and abs(loop["period"] - prev_loop["period"]) <= 2                 and n_frames - (loop["start"] + loop["period"]) >= max(loop["period"], CONFIRM_SEC * frame_rate):
+            end_reason = "loop found"
+            break
+        prev_loop = loop
+        last_end = max([n.end for lst in notes.values() for n in lst] + [d.end for d in drums], default=0)
+        if last_end and n_frames - last_end >= SILENCE_SEC * frame_rate:
+            end_reason = "song ended"
+            break
+    player.finish_warnings()
+    frames, notes, stats, drums, events, loop = analyze(player, n_frames, args, drum_map)
+    print(f"  {n_frames} frames ({n_frames / frame_rate:.1f} s) in {time.time() - t0:.2f} s, "
+          f"{len(player.writes)} register writes; stopped: {end_reason}")
     for w in player.warnings:
         print(f"  Warning: {w}")
 
-    frames = build_frames(writes, n_frames, player.frame_cycles, player.cpu_hz)
-    print(f"  APU state replay: {time.time() - t1:.2f} s")
+    # ---- song range
+    last_end = max([n.end for lst in notes.values() for n in lst] + [d.end for d in drums], default=n_frames)
+    if loop and end_reason == "loop found":
+        end_frame = loop["start"] + loop["period"] * max(1, args.loops)
+        print(f"\nLoop: starts at {loop['start'] / frame_rate:.2f} s, length {loop['period'] / frame_rate:.2f} s "
+              f"({loop['period']} frames); writing intro + {max(1, args.loops)} loop(s)")
+    else:
+        loop = None
+        end_frame = last_end if end_reason == "song ended" else n_frames
+        print(f"\nLoop: none ({end_reason}); song length {end_frame / frame_rate:.2f} s")
 
     outdir = args.outdir or os.path.join(os.path.dirname(os.path.abspath(args.nsf)), "nsf2mid_out")
     os.makedirs(outdir, exist_ok=True)
@@ -282,23 +379,27 @@ def main():
     outputs = []
 
     if args.dump:
-        write_writes_csv(stem + "_writes.csv", writes, player.frame_cycles, player.cpu_hz)
+        write_writes_csv(stem + "_writes.csv", player.writes, player.frame_cycles, player.cpu_hz)
         write_frames_csv(stem + "_frames.csv", frames)
         write_tracker_txt(stem + "_tracker.txt", frames, h, track, frame_rate)
         outputs += [stem + "_writes.csv", stem + "_frames.csv", stem + "_tracker.txt"]
 
-    # ---- Phase 2: notes + tempo + MIDI
-    notes, stats = extract_notes(frames, keep_tail=args.keep_tail)
     print("\nNotes:")
     for ch in ("P1", "P2", "TRI"):
-        lst = notes[ch]
+        lst = [n for n in notes[ch] if n.start < end_frame]
         tails = sum(1 for n in lst if n.has_tail)
         st = stats[ch]
         cue = "on" if st["trigger_cue"] else "IGNORED (driver re-triggers almost every frame)"
         print(f"  {ch:3}: {len(lst):4} notes, {tails:4} reverb tails cut, "
               f"trigger ratio {st['trigger_ratio']:.2f} -> trigger cue {cue}")
+    in_range = [d for d in drums if d.start < end_frame]
+    if in_range:
+        print("Drums (source, kind, hits -> GM note):")
+        for src, kind, cnt, gm, info in summarize(in_range):
+            print(f"  {src:3} {str(kind):28} {cnt:4} -> {gm:3} {GM_NAMES.get(gm, ''):16} ({info})")
 
-    onsets = tempo_onsets(notes, frames)
+    onsets = [o for o in tempo_onsets(notes, frames) if o < end_frame]
+    onsets += [d.start for d in in_range if d.src == "DMC"]
     tempo = detect_tempo_map(onsets, frame_rate, args.rows_per_beat, args.unit)
     tmap = None
     if tempo is None:
@@ -313,10 +414,10 @@ def main():
             if sg.score < 0.8:
                 print("    Warning: poor grid fit (rubato or unsupported rhythm?)")
         tmap = TickMap(tempo, PPQ, not args.no_quantize)
-        write_smf(stem + ".mid", build_midi(notes, tmap, h.title, track), PPQ)
+        write_smf(stem + ".mid", build_midi(notes, drums, tmap, h.title, track, end_frame, loop), PPQ)
         outputs.insert(0, stem + ".mid")
 
-    write_notes_csv(stem + "_notes.csv", notes, tmap)
+    write_notes_csv(stem + "_notes.csv", notes, drums, tmap)
     outputs.append(stem + "_notes.csv")
     print("\nOutput:")
     for o in outputs:

@@ -29,6 +29,7 @@ WINDOW_SEC = 8.0
 FIT_OK = 0.85
 LOCAL_MIN = 0.6     # a window gets its own grid if it fits at least this well
 LOCAL_GAIN = 0.25   # ... and beats the global grid by this margin
+MERGE_RATIO = 0.03  # neighbouring segments closer than this are merged
 
 
 def _tol(unit):
@@ -195,11 +196,23 @@ def _segment(onsets, frame_rate, g):
             runs.append([lab, list(sub)])
     runs = [r for r in runs if r[1]]
 
+    # merge neighbouring runs whose units differ by < MERGE_RATIO (accumulator drift, not a tempo change)
+    merged = []
+    for lab, sub in runs:
+        u = g["unit"] if lab is None else lab
+        if merged:
+            pu = g["unit"] if merged[-1][0] is None else merged[-1][0]
+            if abs(u - pu) / pu < MERGE_RATIO:
+                merged[-1][1].extend(sub)
+                continue
+        merged.append([lab, list(sub)])
+    runs = merged
+
     segs = []
     for lab, sub in runs:
         u = g["unit"] if lab is None else lab
         if lab is not None:
-            lg = detect_grid(sub, max(2.0, u * 0.9), min(48.0, u * 1.1))
+            lg = detect_grid(sub, max(2.0, u * 0.95), min(48.0, u * 1.05))
             if lg:
                 u = lg["unit"]
         ph = _phase(sub, u)

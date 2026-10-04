@@ -26,7 +26,7 @@ TRIGGER_SPAM_RATIO = 0.6  # trigger on more than this share of sounding frames -
 
 
 class Note:
-    __slots__ = ("ch", "start", "end", "gate_end", "pitch", "vols", "duties", "cue")
+    __slots__ = ("ch", "start", "end", "gate_end", "pitch", "vols", "duties", "pitches", "cue")
 
     def __init__(self, ch, start, pitch, cue):
         self.ch = ch
@@ -36,6 +36,7 @@ class Note:
         self.pitch = pitch          # MIDI note number
         self.vols = []
         self.duties = []
+        self.pitches = []           # per-frame pitch (float semitones, None while silent)
         self.cue = cue              # what started the note: trig / pitch / sound
 
     @property
@@ -150,12 +151,15 @@ def extract_channel(frames, ch, keep_tail=False):
                 k = f - start_frame
                 moved_v = cur.vols[-k:]
                 moved_d = cur.duties[-k:]
+                moved_p = cur.pitches[-k:]
                 del cur.vols[-k:]
                 del cur.duties[-k:]
+                del cur.pitches[-k:]
                 close(start_frame)
                 cur = Note(ch, start_frame, rp, start_new)
                 cur.vols.extend(moved_v)
                 cur.duties.extend(moved_d)
+                cur.pitches.extend(moved_p)
             else:
                 close(f)
                 cur = Note(ch, start_frame, rp, start_new)
@@ -163,9 +167,11 @@ def extract_channel(frames, ch, keep_tail=False):
                 for _ in range(f - start_frame):
                     cur.vols.append(0)
                     cur.duties.append(duty)
+                    cur.pitches.append(None)
             off_count = 0
         cur.vols.append(vol)
         cur.duties.append(duty)
+        cur.pitches.append(note)
 
     close(len(infos))
     return notes, {"trigger_cue": use_trig, "trigger_ratio": (trigs / sounding) if sounding else 0.0}
@@ -188,6 +194,7 @@ def merge_slides(notes, keep_tail=False):
                     and (p.end - p.start <= SLIDE_MAX or "slide" in p.cue)):
                 p.vols.extend(n.vols)
                 p.duties.extend(n.duties)
+                p.pitches.extend(n.pitches)
                 p.end = n.end
                 g = find_gate_end(p.vols)
                 p.gate_end = p.end if keep_tail else p.start + g
@@ -201,6 +208,7 @@ def merge_slides(notes, keep_tail=False):
 
 
 SLIDE_MAX = 3      # frames
+ONSET_MERGE = 2    # tempo onsets closer than this (frames) are one event
 MIN_FRAMES = 2     # notes shorter than this are dropped
 
 
@@ -226,7 +234,7 @@ def tempo_onsets(notes, frames):
     """Onsets used for tempo detection.
 
     Pitch-split notes are excluded (glides, legato runs are less reliable), and
-    onsets within 1 frame of each other are merged (some drivers update the
+    onsets within ONSET_MERGE frames of each other are merged (some drivers update the
     channels on different frames).
     """
     raw = [n.start for lst in notes.values() for n in lst if not n.cue.startswith("pitch")]
@@ -234,7 +242,7 @@ def tempo_onsets(notes, frames):
     raw = sorted(set(raw))
     out = []
     for o in raw:
-        if out and o - out[-1] <= 1:
+        if out and o - out[-1] <= ONSET_MERGE:
             continue
         out.append(o)
     return out

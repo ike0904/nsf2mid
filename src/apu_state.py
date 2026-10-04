@@ -23,6 +23,8 @@ SEQ4_PERIOD = 29830
 SEQ5 = [7457, 14913, 22371, 29829, 37281]
 SEQ5_PERIOD = 37282
 
+TRI_RACE_CYCLES = 4000   # see Triangle.write
+
 NOTE_NAMES = ["C-", "C#", "D-", "D#", "E-", "F-", "F#", "G-", "G#", "A-", "A#", "B-"]
 
 
@@ -143,11 +145,20 @@ class Triangle:
         self.length = 0
         self.timer = 0
         self.enabled = False
+        self.hi_write_cycle = None
 
-    def write(self, reg, v):
+    def write(self, reg, v, cyc=0):
         if reg == 0:
             self.control = bool(v & 0x80)
             self.lin_reload_val = v & 0x7F
+            # Race: a quarter-frame clock between the $400B write and this $4008 write
+            # reloads the counter with the old (often 0) value and clears the reload flag,
+            # silencing the note. Real hardware can do this too (driver timing bug), but the
+            # intent is clearly a note, so apply the reload when $400B was written just before.
+            if (self.lin == 0 and self.lin_reload_val and self.hi_write_cycle is not None
+                    and 0 <= cyc - self.hi_write_cycle < TRI_RACE_CYCLES):
+                self.lin = self.lin_reload_val
+                self.lin_reload = True
         elif reg == 2:
             self.timer = (self.timer & 0x700) | v
         elif reg == 3:
@@ -155,6 +166,7 @@ class Triangle:
             if self.enabled:
                 self.length = LENGTH_TABLE[v >> 3]
             self.lin_reload = True
+            self.hi_write_cycle = cyc
 
     def clock_quarter(self):
         if self.lin_reload:
@@ -318,7 +330,7 @@ class APUState:
         elif addr <= 0x4007:
             self.p2.write(addr - 0x4004, v)
         elif addr <= 0x400B:
-            self.tri.write(addr - 0x4008, v)
+            self.tri.write(addr - 0x4008, v, cyc)
         elif addr <= 0x400F:
             self.noise.write(addr - 0x400C, v)
         elif addr <= 0x4013:

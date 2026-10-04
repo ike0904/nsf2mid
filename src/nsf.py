@@ -166,8 +166,20 @@ class NSFPlayer:
 
     def _log_write(self, addr, val):
         cyc = self.cpu.cycles
-        self.writes.append((cyc, addr, val))
+        self.writes.append((cyc - self.t0 if self.t0 is not None else cyc, addr, val))
+        dmc = self.apu.dmc
+        before = dmc.start_count
         self.apu.write(cyc, addr, val)
+        if dmc.start_count != before:
+            self._capture_dmc(dmc.sample_addr, dmc.sample_len)
+
+    def _capture_dmc(self, addr, length):
+        """Keep the bytes of each DPCM sample (for drum classification)."""
+        key = (addr, length)
+        if key in self.dmc_samples:
+            return
+        rd = self.bus.read
+        self.dmc_samples[key] = bytes(rd(0x8000 | ((addr + i) & 0x7FFF)) for i in range(length))
 
     def _status_read(self):
         # Drivers that read $4015 (length counter status) need a live APU model
@@ -187,21 +199,20 @@ class NSFPlayer:
                 return False
         return True
 
-    def run(self, track, frames, on_frame=None):
-        """Run `track` (1-based) for `frames` play calls.
-
-        on_frame(frame_index, frame_start_cycle) is called before each PLAY
-        (cycle relative to the start of frame 0).
-        Returns the list of register writes: (cpu_cycle, addr, value).
-        Writes made during INIT have negative frame index semantics:
-        they occur before cycle 0 of frame 0 (cycle values < 0).
-        """
+    def start(self, track):
+        """Load the tune and run INIT for `track` (1-based)."""
         h = self.header
+        self.warnings = []
         if h.expansion:
             self.warnings.append(
                 f"Expansion audio ({', '.join(h.expansion_names)}) is not emulated; "
                 f"only 2A03 channels are logged.")
         self.writes = []
+        self.dmc_samples = {}
+        self.t0 = None
+        self.frames_done = 0
+        self.stuck = 0
+        self.aborted = False
         self.apu = APUState(self.cpu_hz)
         self.bus = NSFBus(h, self.rom, self._log_write, self._status_read)
         self.cpu = CPU6502(self.bus)
@@ -223,26 +234,41 @@ class NSFPlayer:
         cpu.p = 0x24
         if not self._call(h.init_addr, 3_000_000):
             self.warnings.append("INIT did not return within cycle limit")
-        # Frame 0 starts when INIT returns; the log is re-based to that point at the end
-        t0 = cpu.cycles
+        # Frame 0 starts when INIT returns; INIT writes get negative cycle values
+        self.t0 = cpu.cycles
+        self.writes = [(c - self.t0, a, v) for c, a, v in self.writes]
 
+    def advance(self, frames):
+        """Call PLAY `frames` more times. Returns the total number of frames emulated."""
+        cpu = self.cpu
         fc = self.frame_cycles
-        stuck = 0
-        for f in range(frames):
-            start = t0 + int(round(f * fc))
+        play = self.header.play_addr
+        for _ in range(frames):
+            if self.aborted:
+                break
+            f = self.frames_done
+            start = self.t0 + int(round(f * fc))
             if cpu.cycles < start:
                 cpu.cycles = start
-            if on_frame:
-                on_frame(f, start - t0)
             cpu.s = 0xFD
-            if not self._call(h.play_addr, int(fc * 2)):
-                stuck += 1
+            if not self._call(play, int(fc * 2)):
+                self.stuck += 1
                 cpu.s = 0xFD
                 cpu.jammed = False
-                if stuck >= 10 and stuck == f + 1:
+                if self.stuck >= 10 and self.stuck == f + 1:
                     self.warnings.append("PLAY never returns; emulation aborted")
-                    break
-        if stuck:
-            self.warnings.append(f"PLAY did not return within limit on {stuck} frame(s)")
-        self.writes = [(c - t0, a, v) for c, a, v in self.writes]
+                    self.aborted = True
+            self.frames_done += 1
+        return self.frames_done
+
+    def finish_warnings(self):
+        if self.stuck and not self.aborted:
+            self.warnings.append(f"PLAY did not return within limit on {self.stuck} frame(s)")
+
+    def run(self, track, frames):
+        """Run `track` (1-based) for `frames` play calls; returns the register writes
+        as (cpu_cycle relative to frame 0, addr, value). INIT writes have cycle < 0."""
+        self.start(track)
+        self.advance(frames)
+        self.finish_warnings()
         return self.writes
