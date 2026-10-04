@@ -18,9 +18,10 @@ Usage:
   v0.1.4 (2026-10-04) - 三角波のオクターブを元に戻す (--tri-octave 既定 0)
   v0.1.5 (2026-10-04) - 三角波の GM 音色を 38→80 (Sibelius での移調表示・トラック並べ替え対策)・--programs
   v0.1.6 (2026-10-04) - トラック名を楽器名と紛らわしくない名前に変更 (Sibelius が Triangle を打楽器と判定)
+  v0.1.7 (2026-10-04) - 音色 (プログラムチェンジ) を既定で出力しない
 """
 
-APP_VERSION = "v0.1.6"
+APP_VERSION = "v0.1.7"
 
 import argparse
 import csv
@@ -41,10 +42,11 @@ from loop import detect_loop, REPEATS as LOOP_REPEATS  # noqa: E402
 
 PPQ = 480
 MIDI_CH = {"P1": 0, "P2": 1, "TRI": 2}
-# GM programs (0-based). All tonal tracks use Lead 1 (square): a non-transposing instrument of one family,
-# so notation software (Sibelius) neither transposes the triangle (bass = written an octave up)
-# nor re-sorts the tracks by instrument family.
-MIDI_PROG = {"P1": 80, "P2": 80, "TRI": 80}
+# GM programs (0-based) for the tonal tracks; None = no program change (default).
+# Notation software (Sibelius) picks instruments from the program number (e.g. 38 Synth Bass is
+# notated an octave up) and re-sorts tracks by instrument family, so no program is written unless
+# requested with --programs.
+MIDI_PROG = {"P1": None, "P2": None, "TRI": None}
 CHUNK_SEC = 60.0      # emulate in chunks; stop when a loop or the end of the song is found
 SILENCE_SEC = 4.0     # this much silence after the last note = song ended
 CONFIRM_SEC = 20.0    # at least this much repeat after the first loop (short loops)
@@ -321,7 +323,7 @@ def main():
                     help="octave shift for triangle notes in the MIDI (default 0 = APU pitch)")
     ap.add_argument("--programs", default="",
                     help='GM programs (0-based) for P1,P2,TRI, e.g. "80,80,38"; "-" = no program change '
-                         '(default 80,80,80)')
+                         '(default: none)')
     ap.add_argument("--no-tri-drums", action="store_true", help="keep triangle glide drums as triangle notes")
     ap.add_argument("--drum-map", default="",
                     help='override drum notes, e.g. "3:0=42,12:0=36,DMC:E000:129:15=38" '

@@ -54,7 +54,7 @@ python src/nsf2mid.py FILE.nsf [-t TRACK] [-s SECONDS] [-o OUTDIR] [--info] [--d
 | `--loops` | ループ部を何回書き出すか（既定 1 = イントロ＋ループ 1 回） |
 | `--no-loop` | ループ検出をしない（`-s` の秒数をそのまま変換） |
 | `--tri-octave` | 三角波の MIDI 出力のオクターブ移動（既定 0 = APU の物理的な音高） |
-| `--programs` | P1,P2,TRI の GM 音色番号（0 始まり）。例 `"80,80,38"`、`-` で音色指定なし（既定 80,80,80） |
+| `--programs` | P1,P2,TRI の GM 音色番号（0 始まり）。例 `"80,80,38"`、`-` で音色指定なし（既定: 指定なし） |
 | `--no-tri-drums` | 三角波ドラムを三角波の音符のまま残す |
 | `--drum-map` | ドラム割当の上書き。例 `"3:0=42,12:0=36,DMC:E000:129:15=38"`（ノイズは `周期番号:モード`、DPCM は `DMC:アドレス16進:長さ:レート`） |
 
@@ -64,7 +64,7 @@ python src/nsf2mid.py FILE.nsf [-t TRACK] [-s SECONDS] [-o OUTDIR] [--info] [--d
 |:---|:---|
 | `*.mid` | MIDI（Track0: テンポマップ・4/4・ループマーカー、Track1-3: Ch1 Pulse / Ch2 Pulse / Ch3 Wave（ch 1-3）、ドラムトラック: noise / DPCM / triangle（ch 10、ヒットがある場合のみ）） |
 
-※ 音程トラックは既定ですべて GM 80（Square Lead）。楽譜ソフト（Sibelius）は音色番号から楽器を決め、
+※ 音程トラックは既定で音色（プログラムチェンジ）を出力しない（v0.1.7〜）。v0.1.5〜0.1.6 は GM 80。楽譜ソフト（Sibelius）は音色番号から楽器を決め、
   楽器の種類順にトラックを並べ替える。また 38（Synth Bass）はベース＝1 オクターブ上に記譜する移調楽器として
   扱われ、三角波が 1 オクターブ高く表示されていた（v0.1.4 まで）。
 ※ トラック名は Ch1 Pulse / Ch2 Pulse / Ch3 Wave / Ch4 Noise drums / Ch5 DPCM drums / Ch3 Wave drums。
