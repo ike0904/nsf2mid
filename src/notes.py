@@ -76,14 +76,21 @@ def find_gate_end(vols):
     suf = [0] * (n + 1)
     for i in range(n - 1, -1, -1):
         suf[i] = max(vols[i], suf[i + 1])
+    peak_i = vols.index(peak)
+    rose = False            # volume rose again after the attack peak (tremolo / modulation)
     for g in range(1, n - 1):
         v = vols[g]
+        if g > peak_i and v > vols[g - 1]:
+            rose = True
         if suf[g] > v:          # volume rises again later -> not a tail
             continue
         if v * 2 > peak:
             continue
         drop = vols[g - 1] - v
-        if drop >= 3 or v <= max(2, peak / 4.0):
+        low_floor = v <= max(2, peak / 4.0)
+        # After a tremolo (Okhotsk ni Kiyu: B,4,A,5,9,6,8,7 then held at 4) a sudden drop is part
+        # of the modulation and the following level is the sustain, so only a low floor counts.
+        if low_floor or (drop >= 3 and not rose):
             return g
     return n
 
