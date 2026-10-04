@@ -30,6 +30,7 @@ FIT_OK = 0.85
 LOCAL_MIN = 0.6     # a window gets its own grid if it fits at least this well
 LOCAL_GAIN = 0.25   # ... and beats the global grid by this margin
 MERGE_RATIO = 0.03  # neighbouring segments closer than this are merged
+PHRASE_GAP_ROWS = 6 # a gap this long (in rows) before an onset is a phrase break
 
 
 def _tol(unit):
@@ -135,11 +136,20 @@ def shuffle_step(onsets, unit):
     return best_s if best >= SHUFFLE_PAIRS else None
 
 
-def choose_rows(unit, frame_rate, ternary, prefer_bpm=None):
+def choose_rows(unit, frame_rate, ternary, prefer_bpm=None, onsets=None):
     family = (12, 6, 3, 24) if ternary else (4, 2, 8, 16)
     if prefer_bpm:
         # keep continuity with the previous segment
         return min(family, key=lambda m: abs(math.log((60.0 * frame_rate / (unit * m)) / prefer_bpm)))
+    if ternary and onsets and len(onsets) > 8:
+        # the most common interval is an 8th note (half a beat), if that gives a sane tempo
+        # (Super Mario Bros.: grid 3 frames, mostly 9-frame 8ths -> 6 rows/beat = 200 BPM,
+        # triplets are 6 frames = 2 rows)
+        iois = Counter(round((b - a) / unit) for a, b in zip(onsets, onsets[1:]))
+        mode = max((i for i in iois if i > 0), key=lambda i: iois[i], default=0)
+        m = 2 * mode
+        if m in family and BPM_LO <= 60.0 * frame_rate / (unit * m) < 240.0:
+            return m
     for m in family:
         bpm = 60.0 * frame_rate / (unit * m)
         if BPM_LO <= bpm < BPM_HI:
@@ -204,7 +214,7 @@ def detect_tempo_map(onsets, frame_rate, rows_per_beat=None, unit=None):
             # 1 beat = one long-short pair (2s + s); double it if that would exceed 240 BPM
             s.rows = 3 * step if 60.0 * frame_rate / (s.unit * 3 * step) < 240.0 else 6 * step
         else:
-            s.rows = choose_rows(s.unit, frame_rate, ternary, prev)
+            s.rows = choose_rows(s.unit, frame_rate, ternary, prev, onsets)
         s.bpm = 60.0 * frame_rate / (s.unit * s.rows)
         prev = s.bpm
     return {"global": g, "segments": segs, "ternary": ternary, "shuffle": shuffle}
@@ -284,10 +294,21 @@ def _segment(onsets, frame_rate, g):
         ha = _hits(region, a.unit, a.phase)
         hb = _hits(region, b.unit, b.phase)
         best_j, best_v = None, -1
+        scores = []
         for j in range(1, len(region)):
             v = sum(ha[:j]) + sum(hb[j:])
+            scores.append((j, v))
             if v > best_v:
                 best_j, best_v = j, v
+        # Prefer a phrase break (long note / rest before the onset) when it scores nearly as well:
+        # a ritardando at the end of a section otherwise drifts onto the next section's grid
+        # (Dragon Quest II overture: the 6/8 intro slows down from 13 to 16 frames per 8th,
+        # holds a G, and the 4/4 part starts after a 164-frame gap).
+        slack = max(3, int(0.3 * len(region)))
+        breaks = [(j, v) for j, v in scores
+                  if region[j] - region[j - 1] >= PHRASE_GAP_ROWS * a.unit and v >= best_v - slack]
+        if breaks:
+            best_j = min(breaks, key=lambda jv: abs(jv[0] - best_j))[0]
         b.start = region[best_j]
     # drop segments that became empty or out of order
     clean = []
@@ -304,43 +325,215 @@ def _same(a, b):
     return abs(a - b) / a < 0.015
 
 
-class TickMap:
-    """frame -> MIDI tick through a piecewise tempo map."""
+TRACK_FIT = 0.9          # segments fitting worse than this are tempo-tracked (rubato / ritardando)
+COMPOUND_MIN_NOTES = 3
+COMPOUND_FIT = 0.85      # long notes on 3-eighth boundaries (dotted-quarter beats) ...
+COMPOUND_GAIN = 0.15     # ... clearly more often than on 2-eighth boundaries
 
-    def __init__(self, tmap, ppq, quantize=True):
+
+def track_rows(onsets, unit, origin):
+    """Assign grid rows to onsets while following a slowly changing tempo.
+
+    Returns [(frame, row)] anchors. Each interval is rounded to whole rows with the current
+    unit, then the unit is updated from short intervals (<= 4 rows), so a ritardando
+    (13, 14, 15, 16 frames per row) keeps every note on its row.
+    """
+    anchors = []
+    u = unit
+    f_prev, r_prev = origin, 0
+    for i, o in enumerate(onsets):
+        if i + 1 < len(onsets) and onsets[i + 1] - o < 0.5 * u:
+            continue                    # grace note just before the main note: anchor the main note
+        d = o - f_prev
+        r = int(round(d / u))
+        if r < 1:
+            continue                    # grace note / same event
+        anchors.append((o, r_prev + r))
+        if r <= 4:
+            u = 0.5 * u + 0.5 * (d / r)
+        f_prev, r_prev = o, r_prev + r
+    return anchors
+
+
+class _Part:
+    def __init__(self, seg, origin_frame, origin_tick, tpu, anchors, unit_end):
+        self.seg = seg
+        self.origin_frame = origin_frame
+        self.origin_tick = origin_tick
+        self.tpu = tpu
+        self.anchors = anchors          # [(frame, row)] for tracked parts, [] for steady parts
+        self.unit_end = unit_end        # local unit after the last anchor
+        self.last_onset = origin_frame
+        self.meter = (4, 4)
+        self.bar_ticks = 4 * 480
+
+    def rows_at(self, frame):
+        s = self.seg
+        if not self.anchors:
+            return (frame - self.origin_frame) / s.unit
+        pts = [(self.origin_frame, 0)] + self.anchors
+        if frame <= pts[0][0]:
+            return (frame - pts[0][0]) / s.unit
+        for (f0, r0), (f1, r1) in zip(pts, pts[1:]):
+            if frame <= f1:
+                return r0 + (frame - f0) / (f1 - f0) * (r1 - r0)
+        f_last, r_last = pts[-1]
+        return r_last + (frame - f_last) / self.unit_end
+
+    def frame_at_row(self, row):
+        pts = [(self.origin_frame, 0)] + self.anchors
+        for (f0, r0), (f1, r1) in zip(pts, pts[1:]):
+            if row <= r1:
+                return f0 + (row - r0) / (r1 - r0) * (f1 - f0)
+        f_last, r_last = pts[-1]
+        return f_last + (row - r_last) * self.unit_end
+
+
+class TickMap:
+    """frame -> MIDI tick through a tempo map of grid segments.
+
+    - steady segments: fixed grid unit (one tempo)
+    - segments with a poor grid fit (rubato, ritardando): rows are tracked note by note
+      (track_rows) and the timing is kept with tempo events between the anchors
+    - meter per segment: 6/8 when long notes sit on dotted-quarter boundaries, else 4/4
+    - a new segment starts on the bar line after the last note of the previous one, which
+      absorbs fermatas / held notes at section ends; the gap gets its own tempo event so the
+      playback timing is unchanged
+    """
+
+    def __init__(self, tmap, ppq, quantize=True, frame_rate=60.0, onsets=None, notes=None,
+                 meters=None):
         self.ppq = ppq
         self.quantize = quantize
-        self.parts = []   # (start_frame, origin_frame, unit, tick_at_origin, ticks_per_unit, bpm)
-        tick = 0
-        prev = None
-        for s in tmap["segments"]:
+        self.fr = frame_rate
+        onsets = sorted(set(onsets or []))
+        segs = tmap["segments"]
+        self.parts = []
+        for k, s in enumerate(segs):
             tpu = ppq / s.rows
-            if prev is None:
+            end = segs[k + 1].start if k + 1 < len(segs) else float("inf")
+            seg_on = [o for o in onsets if (k == 0 or o >= s.start) and o < end]
+            if k == 0:
                 # keep the leading silence: the song starts at frame 0 (drivers start the sequence
                 # on the first PLAY call), so the first grid point at/near frame 0 is tick 0
                 origin = s.phase + s.unit * round((0 - s.phase) / s.unit)
+                origin_tick = 0
             else:
-                origin = s.phase + s.unit * round((s.start - s.phase) / s.unit)
-            if prev is not None:
-                tick = prev[3] + round((origin - prev[1]) / prev[2]) * prev[4]
-            part = (s.start, origin, s.unit, tick, tpu, s.bpm)
+                origin = s.start
+                origin_tick = self._bar_after(self.parts[-1], origin)
+            anchors, unit_end = [], s.unit
+            if s.score < TRACK_FIT and len(seg_on) >= 4:
+                anchors = track_rows([o for o in seg_on if o > origin], s.unit, origin)
+                if len(anchors) >= 2:
+                    (fa, ra), (fb, rb) = anchors[-2], anchors[-1]
+                    unit_end = (fb - fa) / (rb - ra)
+            part = _Part(s, origin, origin_tick, tpu, anchors, unit_end)
+            part.last_onset = seg_on[-1] if seg_on else origin
+            if meters and k < len(meters) and meters[k]:
+                part.meter = meters[k]
+            else:
+                part.meter = self._detect_meter(part, notes, end)
+            part.bar_ticks = int(round(ppq * 4 * part.meter[0] / part.meter[1]))
+            s.meter = part.meter
+            s.tracked = bool(anchors)
             self.parts.append(part)
-            prev = part
 
-    def tempo_events(self):
-        return [(max(0, int(round(p[3]))), p[5]) for p in self.parts]
+    # ------------------------------------------------------------------ meter
+    def _detect_meter(self, part, notes, end):
+        """6/8 if notes longer than one 8th start on 3-eighth boundaries, else 4/4."""
+        rows = part.seg.rows
+        if notes is None or rows % 2:
+            return (4, 4)
+        eighth = rows // 2
+        pos = []
+        for lst in notes.values():
+            starts = [n.start for n in lst if part.origin_frame - 1 <= n.start < end]
+            for a, b in zip(starts, starts[1:] + [None]):
+                ra = part.rows_at(a)
+                if b is not None and part.rows_at(b) - ra < 2 * eighth - 0.5:
+                    continue                # short note
+                pos.append(int(round(ra / eighth)))
+        if len(pos) < COMPOUND_MIN_NOTES:
+            return (4, 4)
+        s3 = sum(1 for p in pos if p % 3 == 0) / len(pos)
+        s2 = sum(1 for p in pos if p % 2 == 0) / len(pos)
+        if s3 >= COMPOUND_FIT and s3 - s2 >= COMPOUND_GAIN:
+            return (6, 8)
+        return (4, 4)
+
+    # -------------------------------------------------------------- mapping
+    def _bar_after(self, prev, frame):
+        """Tick of the bar line where a segment starting at `frame` begins."""
+        last_tick = self._tick_in(prev, prev.last_onset)
+        bar = prev.bar_ticks
+        rel = last_tick - prev.origin_tick
+        nxt = prev.origin_tick + (int(rel // bar) + 1) * bar
+        natural = self._tick_in(prev, frame)
+        if natural - nxt > 2 * bar:
+            # a real multi-bar rest: keep its length, aligned to the bar grid
+            nxt = prev.origin_tick + int(round((natural - prev.origin_tick) / bar)) * bar
+        return nxt
+
+    def _tick_in(self, part, frame):
+        rows = part.rows_at(frame)
+        if self.quantize:
+            rows = round(rows)
+        return part.origin_tick + rows * part.tpu
+
+    def _part_for(self, frame):
+        part = self.parts[0]
+        for p in self.parts[1:]:
+            if frame >= p.origin_frame - p.seg.unit / 2:
+                part = p
+        return part
+
+    def __call__(self, frame):
+        return max(0, int(round(self._tick_in(self._part_for(frame), frame))))
 
     @property
     def min_ticks(self):
-        return min(p[4] for p in self.parts)
+        return min(p.tpu for p in self.parts)
 
-    def __call__(self, frame):
-        part = self.parts[0]
-        for p in self.parts:
-            if frame >= p[0] - p[2] / 2:
-                part = p
-        _, origin, unit, t0, tpu, _ = part
-        rows = (frame - origin) / unit
-        if self.quantize:
-            rows = round(rows)
-        return max(0, int(round(t0 + rows * tpu)))
+    def _bpm(self, frames_per_row, part):
+        return 60.0 * self.fr / (frames_per_row * part.seg.rows)
+
+    def tempo_events(self):
+        ev = []
+        for k, p in enumerate(self.parts):
+            if k > 0:
+                # gap from the previous part's last note to this bar line
+                prev = self.parts[k - 1]
+                t_last = self._tick_in(prev, prev.last_onset)
+                dt = (p.origin_tick - t_last) / self.ppq
+                df = p.origin_frame - prev.last_onset
+                if dt > 0 and df > 0:
+                    ev.append((t_last, 60.0 * self.fr * dt / df))
+            if not p.anchors:
+                ev.append((p.origin_tick, p.seg.bpm))
+                continue
+            # one tempo per bar (averages out the +-1 frame jitter of accumulator drivers,
+            # follows a ritardando bar by bar)
+            rpb = p.bar_ticks / p.tpu
+            last_row = p.anchors[-1][1]
+            b = 0
+            while b * rpb < last_row:
+                r0, r1 = b * rpb, min((b + 1) * rpb, last_row)
+                if r1 - r0 < 1:
+                    break
+                fpr = (p.frame_at_row(r1) - p.frame_at_row(r0)) / (r1 - r0)
+                ev.append((p.origin_tick + r0 * p.tpu, self._bpm(fpr, p)))
+                b += 1
+        # drop redundant events (< 1 % change); a later event at the same tick wins
+        out = []
+        for tick, bpm in sorted(ev, key=lambda e: e[0]):
+            tick = max(0, int(round(tick)))
+            if out and out[-1][0] == tick:
+                out[-1] = (tick, bpm)
+                if len(out) > 1 and abs(bpm - out[-2][1]) / out[-2][1] < 0.01:
+                    out.pop()
+            elif not out or abs(bpm - out[-1][1]) / out[-1][1] >= 0.01:
+                out.append((tick, bpm))
+        return out
+
+    def meter_events(self):
+        return [(int(round(p.origin_tick)), p.meter) for p in self.parts]

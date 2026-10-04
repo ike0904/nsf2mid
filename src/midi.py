@@ -25,8 +25,8 @@ class Track:
         us = int(round(60_000_000 / bpm))
         self.meta(tick, 0x51, us.to_bytes(3, "big"))
 
-    def time_signature(self, tick, num=4, den_pow=2):
-        self.meta(tick, 0x58, bytes([num, den_pow, 24, 8]))
+    def time_signature(self, tick, num=4, den_pow=2, clocks=24):
+        self.meta(tick, 0x58, bytes([num, den_pow, clocks, 8]))
 
     def program(self, tick, ch, prog):
         self.events.append((tick, 1, bytes([0xC0 | ch, prog & 0x7F])))

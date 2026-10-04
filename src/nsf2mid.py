@@ -22,9 +22,10 @@ Usage:
   v0.1.8 (2026-10-04) - トレモロ後の持続音を余韻と誤判定しない (オホーツクに消ゆ 1ch が短すぎた)
   v0.1.9 (2026-10-04) - 冒頭の空白を保持・ベースラインからの拍判定 (マリオUSA 地上: 200 BPM、3 連 2 個分の休符)
   v0.1.10 (2026-10-04) - シャッフル (長短 2:1 の交互) 検出 (マリオ3: 200 BPM 3 連)・ベースライン拍判定は廃止
+  v0.1.11 (2026-10-04) - 拍子検出 (6/8・4/4)・リタルダンド/フェルマータ追従・区間境目のフレーズ優先・3 連系の拍選択 (マリオ 200 BPM)
 """
 
-APP_VERSION = "v0.1.10"
+APP_VERSION = "v0.1.11"
 
 import argparse
 import csv
@@ -227,7 +228,8 @@ def build_midi(notes, drums, tmap, title, track_no, end_frame, loop, transpose, 
     t0 = Track(f"{title} #{track_no}" if title else f"track {track_no}")
     for tick, bpm in tmap.tempo_events():
         t0.tempo(tick, bpm)
-    t0.time_signature(0, 4, 2)
+    for tick, (num, den) in tmap.meter_events():
+        t0.time_signature(tick, num, den.bit_length() - 1, 36 if (num % 3 == 0 and den == 8) else 24)
     if loop:
         t0.meta(tmap(loop["start"]), 0x06, b"loopStart")
         t0.meta(tmap(loop["start"] + loop["period"]), 0x06, b"loopEnd")
@@ -322,6 +324,8 @@ def main():
     ap.add_argument("--rows-per-beat", type=int, default=None, help="override rows per beat (e.g. 4 = 16th rows)")
     ap.add_argument("--loops", type=int, default=1, help="how many times to write the loop body (default 1)")
     ap.add_argument("--no-loop", action="store_true", help="disable loop detection (emulate --seconds fully)")
+    ap.add_argument("--time-sig", default="",
+                    help='time signature per tempo segment, e.g. "6/8,4/4" ("-" = auto)')
     ap.add_argument("--tri-octave", type=int, default=0,
                     help="octave shift for triangle notes in the MIDI (default 0 = APU pitch)")
     ap.add_argument("--programs", default="",
@@ -438,12 +442,16 @@ def main():
         g = tempo["global"]
         print(f"\nTempo: grid unit {g['unit']:g} frames (fit {g['score'] * 100:.1f}%), "
               f"{'shuffle (long-short on a straight grid)' if tempo.get('shuffle') else 'ternary (triplet/shuffle)' if tempo['ternary'] else 'binary'}")
+        meters = [tuple(int(x) for x in m.split("/")) if m.strip() not in ("", "-") else None
+                  for m in args.time_sig.split(",")] if args.time_sig else None
+        tmap = TickMap(tempo, PPQ, not args.no_quantize, frame_rate, onsets,
+                       {ch: [n for n in lst if n.start < end_frame] for ch, lst in notes.items()}, meters)
         for sg in tempo["segments"]:
             print(f"  from {sg.start / frame_rate:7.2f} s: {sg.bpm:7.2f} BPM  "
-                  f"(unit {sg.unit:.4g} frames x {sg.rows} rows/beat, fit {sg.score * 100:.1f}%)")
-            if sg.score < 0.8:
+                  f"(unit {sg.unit:.4g} frames x {sg.rows} rows/beat, fit {sg.score * 100:.1f}%)  "
+                  f"{sg.meter[0]}/{sg.meter[1]}" + ("  [tempo tracked]" if sg.tracked else ""))
+            if sg.score < 0.8 and not sg.tracked:
                 print("    Warning: poor grid fit (rubato or unsupported rhythm?)")
-        tmap = TickMap(tempo, PPQ, not args.no_quantize)
         write_smf(stem + ".mid", build_midi(notes, drums, tmap, h.title, track, end_frame, loop, transpose, programs), PPQ)
         outputs.insert(0, stem + ".mid")
 
