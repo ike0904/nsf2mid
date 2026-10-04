@@ -34,7 +34,7 @@ def freq_to_note(freq):
 
 
 def note_name(n):
-    if n is None:
+    if n is None or not (0 <= n <= 127.5):
         return "---"
     i = int(round(n))
     return f"{NOTE_NAMES[i % 12]}{i // 12 - 1}"
@@ -336,6 +336,16 @@ class APUState:
             if self.mode5:
                 self._clock_quarter()
                 self._clock_half()
+
+    def read_status(self, cyc):
+        self.advance(cyc)
+        v = 0
+        for ch, bit in ((self.p1, 1), (self.p2, 2), (self.tri, 4), (self.noise, 8)):
+            if ch.length > 0:
+                v |= bit
+        if self.dmc.playing(cyc):
+            v |= 0x10
+        return v
 
     # ------------------------------------------------------------- snapshot
     def snapshot(self):

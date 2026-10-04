@@ -8,6 +8,7 @@ recording every APU register write together with its CPU-cycle timestamp.
 import struct
 
 from cpu6502 import CPU6502
+from apu_state import APUState
 
 NTSC_CPU_HZ = 1789773.0
 PAL_CPU_HZ = 1662607.0
@@ -81,11 +82,12 @@ def _cstr(b):
 class NSFBus:
     """Memory map for an NSF tune (2A03 only for now)."""
 
-    def __init__(self, header, rom_data, on_apu_write):
+    def __init__(self, header, rom_data, on_apu_write, on_status_read=None):
         self.h = header
         self.ram = bytearray(0x800)
         self.sram = bytearray(0x2000)       # $6000-$7FFF
         self.on_apu_write = on_apu_write
+        self.on_status_read = on_status_read
         self.cpu = None
 
         if header.bankswitched:
@@ -122,6 +124,8 @@ class NSFBus:
             return self.image[base + (addr & 0x0FFF)]
         if addr >= 0x6000:
             return self.sram[addr - 0x6000]
+        if addr == 0x4015 and self.on_status_read:
+            return self.on_status_read()
         if addr == SENTINEL:
             return 0x4C  # JMP to self, never actually executed (player stops at sentinel)
         return 0
@@ -161,7 +165,13 @@ class NSFPlayer:
         return speed * self.cpu_hz / 1_000_000.0
 
     def _log_write(self, addr, val):
-        self.writes.append((self.cpu.cycles, addr, val))
+        cyc = self.cpu.cycles
+        self.writes.append((cyc, addr, val))
+        self.apu.write(cyc, addr, val)
+
+    def _status_read(self):
+        # Drivers that read $4015 (length counter status) need a live APU model
+        return self.apu.read_status(self.cpu.cycles)
 
     def _call(self, addr, max_cycles):
         cpu = self.cpu
@@ -180,7 +190,8 @@ class NSFPlayer:
     def run(self, track, frames, on_frame=None):
         """Run `track` (1-based) for `frames` play calls.
 
-        on_frame(frame_index, frame_start_cycle) is called before each PLAY.
+        on_frame(frame_index, frame_start_cycle) is called before each PLAY
+        (cycle relative to the start of frame 0).
         Returns the list of register writes: (cpu_cycle, addr, value).
         Writes made during INIT have negative frame index semantics:
         they occur before cycle 0 of frame 0 (cycle values < 0).
@@ -191,7 +202,8 @@ class NSFPlayer:
                 f"Expansion audio ({', '.join(h.expansion_names)}) is not emulated; "
                 f"only 2A03 channels are logged.")
         self.writes = []
-        self.bus = NSFBus(h, self.rom, self._log_write)
+        self.apu = APUState(self.cpu_hz)
+        self.bus = NSFBus(h, self.rom, self._log_write, self._status_read)
         self.cpu = CPU6502(self.bus)
         cpu = self.cpu
 
@@ -211,19 +223,17 @@ class NSFPlayer:
         cpu.p = 0x24
         if not self._call(h.init_addr, 3_000_000):
             self.warnings.append("INIT did not return within cycle limit")
-        # Re-base time so that frame 0 starts at cycle 0
-        init_end = cpu.cycles
-        self.writes = [(c - init_end, a, v) for c, a, v in self.writes]
-        cpu.cycles = 0
+        # Frame 0 starts when INIT returns; the log is re-based to that point at the end
+        t0 = cpu.cycles
 
         fc = self.frame_cycles
         stuck = 0
         for f in range(frames):
-            start = int(round(f * fc))
+            start = t0 + int(round(f * fc))
             if cpu.cycles < start:
                 cpu.cycles = start
             if on_frame:
-                on_frame(f, start)
+                on_frame(f, start - t0)
             cpu.s = 0xFD
             if not self._call(h.play_addr, int(fc * 2)):
                 stuck += 1
@@ -231,7 +241,8 @@ class NSFPlayer:
                 cpu.jammed = False
                 if stuck >= 10 and stuck == f + 1:
                     self.warnings.append("PLAY never returns; emulation aborted")
-                    return self.writes
+                    break
         if stuck:
             self.warnings.append(f"PLAY did not return within limit on {stuck} frame(s)")
+        self.writes = [(c - t0, a, v) for c, a, v in self.writes]
         return self.writes

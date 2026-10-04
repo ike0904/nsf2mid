@@ -2,15 +2,18 @@
 nsf2mid - NSF to MIDI converter (derived from morokoshi)
 
 Phase 1: 6502 emulation + APU register log / per-frame channel state dump.
+Phase 2: note extraction (P1/P2/TRI), tempo detection, quantized MIDI output.
 
 Usage:
-    python nsf2mid.py FILE.nsf [-t TRACK] [-s SECONDS] [-o OUTDIR] [--info]
+    python nsf2mid.py FILE.nsf [-t TRACK] [-s SECONDS] [-o OUTDIR] [--info] [--dump]
+                      [--keep-tail] [--no-quantize] [--unit FRAMES] [--rows-per-beat N]
 
 バージョン履歴:
   v0.1.0 (2026-10-04) - 初版 (Phase 1: 6502 エミュレータ・APU レジスタログ・フレーム状態ダンプ)
+  v0.1.1 (2026-10-04) - $4015 読み出し対応 (オホーツクに消ゆ等)・Phase 2: ノート抽出・テンポ検出・MIDI 出力
 """
 
-APP_VERSION = "v0.1.0"
+APP_VERSION = "v0.1.1"
 
 import argparse
 import csv
@@ -22,6 +25,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from nsf import NSFPlayer  # noqa: E402
 from apu_state import APUState, note_name  # noqa: E402
+from notes import extract_notes, tempo_onsets  # noqa: E402
+from tempo import detect_tempo_map, TickMap  # noqa: E402
+from midi import Track, write_smf  # noqa: E402
+
+PPQ = 480
+MIDI_CH = {"P1": 0, "P2": 1, "TRI": 2}
+MIDI_PROG = {"P1": 80, "P2": 80, "TRI": 38}   # GM: Lead 1 (square), Synth Bass 1
 
 REG_NAMES = {
     0x4000: "P1_CTRL", 0x4001: "P1_SWEEP", 0x4002: "P1_LO", 0x4003: "P1_HI",
@@ -182,13 +192,60 @@ def write_tracker_txt(path, frames, header, track, frame_rate):
             prev = s
 
 
+def vol_to_velocity(v):
+    return max(1, min(127, int(round(v * 127 / 15))))
+
+
+def build_midi(notes, tmap, title, track_no):
+    t0 = Track(f"{title} #{track_no}" if title else f"track {track_no}")
+    for tick, bpm in tmap.tempo_events():
+        t0.tempo(tick, bpm)
+    t0.time_signature(0, 4, 2)
+    tracks = [t0]
+    for ch in ("P1", "P2", "TRI"):
+        tr = Track({"P1": "Pulse 1", "P2": "Pulse 2", "TRI": "Triangle"}[ch])
+        mch = MIDI_CH[ch]
+        tr.program(0, mch, MIDI_PROG[ch])
+        for n in notes[ch]:
+            st = tmap(n.start)
+            en = tmap(n.gate_end)
+            if en <= st:
+                en = st + (int(tmap.min_ticks) if tmap.quantize else max(1, int(tmap.min_ticks / 4)))
+            vel = 100 if ch == "TRI" else vol_to_velocity(n.peak)
+            tr.note(st, en, mch, n.pitch, vel)
+        tracks.append(tr)
+    return tracks
+
+
+def write_notes_csv(path, notes, tmap):
+    rows = []
+    for ch, lst in notes.items():
+        for n in lst:
+            rows.append((n.start, ch, n))
+    rows.sort(key=lambda r: (r[0], r[1]))
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["ch", "start_frame", "gate_end_frame", "end_frame", "gate_frames", "tail_frames",
+                    "note", "midi", "peak_vol", "cue", "start_tick", "end_tick", "vols"])
+        for _, ch, n in rows:
+            w.writerow([ch, n.start, n.gate_end, n.end, n.gate_end - n.start, n.end - n.gate_end,
+                        note_name(n.pitch), n.pitch, n.peak, n.cue,
+                        tmap(n.start) if tmap else "", tmap(n.gate_end) if tmap else "",
+                        " ".join(f"{v:X}" for v in n.vols[:48])])
+
+
 def main():
-    ap = argparse.ArgumentParser(description=f"nsf2mid {APP_VERSION} - NSF register logger (Phase 1)")
+    ap = argparse.ArgumentParser(description=f"nsf2mid {APP_VERSION} - NSF to MIDI converter")
     ap.add_argument("nsf", help="input .nsf file")
     ap.add_argument("-t", "--track", type=int, default=0, help="track number (1-based, default: start song)")
     ap.add_argument("-s", "--seconds", type=float, default=120.0, help="length to emulate in seconds")
     ap.add_argument("-o", "--outdir", default=None, help="output folder (default: <nsf folder>/nsf2mid_out)")
     ap.add_argument("--info", action="store_true", help="print header info only")
+    ap.add_argument("--dump", action="store_true", help="also write register/frame/tracker dumps (Phase 1)")
+    ap.add_argument("--keep-tail", action="store_true", help="keep reverb tails in note length")
+    ap.add_argument("--no-quantize", action="store_true", help="do not snap notes to the detected grid")
+    ap.add_argument("--unit", type=float, default=None, help="override grid unit (frames per row)")
+    ap.add_argument("--rows-per-beat", type=int, default=None, help="override rows per beat (e.g. 4 = 16th rows)")
     args = ap.parse_args()
 
     player = NSFPlayer(args.nsf)
@@ -222,10 +279,48 @@ def main():
     if len(base) > 40:
         base = base[:40].rstrip()
     stem = os.path.join(outdir, f"{base}_t{track:02d}")
-    write_writes_csv(stem + "_writes.csv", writes, player.frame_cycles, player.cpu_hz)
-    write_frames_csv(stem + "_frames.csv", frames)
-    write_tracker_txt(stem + "_tracker.txt", frames, h, track, frame_rate)
-    print(f"\nOutput:\n  {stem}_writes.csv\n  {stem}_frames.csv\n  {stem}_tracker.txt")
+    outputs = []
+
+    if args.dump:
+        write_writes_csv(stem + "_writes.csv", writes, player.frame_cycles, player.cpu_hz)
+        write_frames_csv(stem + "_frames.csv", frames)
+        write_tracker_txt(stem + "_tracker.txt", frames, h, track, frame_rate)
+        outputs += [stem + "_writes.csv", stem + "_frames.csv", stem + "_tracker.txt"]
+
+    # ---- Phase 2: notes + tempo + MIDI
+    notes, stats = extract_notes(frames, keep_tail=args.keep_tail)
+    print("\nNotes:")
+    for ch in ("P1", "P2", "TRI"):
+        lst = notes[ch]
+        tails = sum(1 for n in lst if n.has_tail)
+        st = stats[ch]
+        cue = "on" if st["trigger_cue"] else "IGNORED (driver re-triggers almost every frame)"
+        print(f"  {ch:3}: {len(lst):4} notes, {tails:4} reverb tails cut, "
+              f"trigger ratio {st['trigger_ratio']:.2f} -> trigger cue {cue}")
+
+    onsets = tempo_onsets(notes, frames)
+    tempo = detect_tempo_map(onsets, frame_rate, args.rows_per_beat, args.unit)
+    tmap = None
+    if tempo is None:
+        print("\nTempo: not enough notes to detect")
+    else:
+        g = tempo["global"]
+        print(f"\nTempo: grid unit {g['unit']:g} frames (fit {g['score'] * 100:.1f}%), "
+              f"{'ternary (triplet/shuffle)' if tempo['ternary'] else 'binary'}")
+        for sg in tempo["segments"]:
+            print(f"  from {sg.start / frame_rate:7.2f} s: {sg.bpm:7.2f} BPM  "
+                  f"(unit {sg.unit:.4g} frames x {sg.rows} rows/beat, fit {sg.score * 100:.1f}%)")
+            if sg.score < 0.8:
+                print("    Warning: poor grid fit (rubato or unsupported rhythm?)")
+        tmap = TickMap(tempo, PPQ, not args.no_quantize)
+        write_smf(stem + ".mid", build_midi(notes, tmap, h.title, track), PPQ)
+        outputs.insert(0, stem + ".mid")
+
+    write_notes_csv(stem + "_notes.csv", notes, tmap)
+    outputs.append(stem + "_notes.csv")
+    print("\nOutput:")
+    for o in outputs:
+        print(f"  {o}")
     return 0
 
 
