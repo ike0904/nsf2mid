@@ -6,7 +6,9 @@ its event sequence with a fixed period L. For each channel's event list
 (start_frame, token) we look for a lag k (in events) such that, scanning back
 from the end, token[i] == token[i+k] and the time difference stays within
 TOL frames of L. The scan stops at the first mismatch -> s (earliest matching
-event). A lag is valid when the matched part spans at least one period.
+event). A lag is valid when the matched part spans (REPEATS - 1) periods, i.e. the
+loop body was heard REPEATS times in a row (a section played twice and then followed
+by a chorus must not be taken for the loop).
 Among valid lags the one with the earliest s wins (ties: smallest L), because
 the true loop repeats back to the loop point while shorter internal repeats
 (A A B ...) break earlier.
@@ -22,6 +24,7 @@ repetitions, hence the tolerance.
 TOL = 2                 # frames
 MIN_EVENTS = 8          # a channel needs this many events to take part
 MIN_LOOP_FRAMES = 120   # ignore periods shorter than 2 s
+REPEATS = 3             # the loop body must be heard this many times in a row
 
 
 def _scan(t, tok, k, period=None):
@@ -55,7 +58,7 @@ def channel_period(events):
         if r is None:
             continue
         s, L, span = r
-        if L < MIN_LOOP_FRAMES or span < L - TOL or (n - s) < MIN_EVENTS:
+        if L < MIN_LOOP_FRAMES or span < (REPEATS - 1) * L - TOL or (n - s) < MIN_EVENTS:
             continue
         cand = (t[s], L)
         if best is None or cand[0] < best[0] - TOL or (abs(cand[0] - best[0]) <= TOL and L < best[1]):

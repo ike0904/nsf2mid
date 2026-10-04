@@ -14,9 +14,10 @@ Usage:
   v0.1.0 (2026-10-04) - 初版 (Phase 1: 6502 エミュレータ・APU レジスタログ・フレーム状態ダンプ)
   v0.1.1 (2026-10-04) - $4015 読み出し対応 (オホーツクに消ゆ等)・Phase 2: ノート抽出・テンポ検出・MIDI 出力
   v0.1.2 (2026-10-04) - Phase 3: ノイズ/DPCM/三角波ドラム・ループ/曲終端検出・分割エミュレーション
+  v0.1.3 (2026-10-04) - ループ確定を 3 回連続一致に変更 (2 ループ後にサビが入る曲への対策)・三角波を 1 オクターブ下げて出力 (--tri-octave)
 """
 
-APP_VERSION = "v0.1.2"
+APP_VERSION = "v0.1.3"
 
 import argparse
 import csv
@@ -33,14 +34,14 @@ from tempo import detect_tempo_map, TickMap  # noqa: E402
 from midi import Track, write_smf  # noqa: E402
 from drums import (noise_hits, dmc_hits, split_triangle_drums, parse_drum_map,  # noqa: E402
                    summarize, GM_NAMES)
-from loop import detect_loop  # noqa: E402
+from loop import detect_loop, REPEATS as LOOP_REPEATS  # noqa: E402
 
 PPQ = 480
 MIDI_CH = {"P1": 0, "P2": 1, "TRI": 2}
 MIDI_PROG = {"P1": 80, "P2": 80, "TRI": 38}   # GM: Lead 1 (square), Synth Bass 1
 CHUNK_SEC = 60.0      # emulate in chunks; stop when a loop or the end of the song is found
 SILENCE_SEC = 4.0     # this much silence after the last note = song ended
-CONFIRM_SEC = 20.0    # repeats needed after the first loop before a loop is accepted
+CONFIRM_SEC = 20.0    # at least this much repeat after the first loop (short loops)
 
 REG_NAMES = {
     0x4000: "P1_CTRL", 0x4001: "P1_SWEEP", 0x4002: "P1_LO", 0x4003: "P1_HI",
@@ -209,7 +210,7 @@ TRACK_NAMES = {"P1": "Pulse 1", "P2": "Pulse 2", "TRI": "Triangle"}
 DRUM_TRACKS = (("NOI", "Drums (noise)"), ("DMC", "Drums (DPCM)"), ("TRI", "Drums (triangle)"))
 
 
-def build_midi(notes, drums, tmap, title, track_no, end_frame, loop):
+def build_midi(notes, drums, tmap, title, track_no, end_frame, loop, transpose):
     t0 = Track(f"{title} #{track_no}" if title else f"track {track_no}")
     for tick, bpm in tmap.tempo_events():
         t0.tempo(tick, bpm)
@@ -239,7 +240,7 @@ def build_midi(notes, drums, tmap, title, track_no, end_frame, loop):
                 continue
             st, en = span(n.start, n.gate_end)
             vel = 100 if ch == "TRI" else vol_to_velocity(n.peak)
-            tr.note(st, en, mch, n.pitch, vel)
+            tr.note(st, en, mch, max(0, min(127, n.pitch + transpose.get(ch, 0))), vel)
         tracks.append(tr)
     for src, name in DRUM_TRACKS:
         hits = [d for d in drums if d.src == src and d.start < end_frame]
@@ -253,7 +254,7 @@ def build_midi(notes, drums, tmap, title, track_no, end_frame, loop):
     return tracks
 
 
-def write_notes_csv(path, notes, drums, tmap):
+def write_notes_csv(path, notes, drums, tmap, transpose):
     rows = []
     for ch, lst in notes.items():
         for n in lst:
@@ -271,8 +272,9 @@ def write_notes_csv(path, notes, drums, tmap):
                             GM_NAMES.get(n.gm, str(n.gm)), n.gm, n.vel, n.info,
                             tmap(n.start) if tmap else "", tmap(n.end) if tmap else "", ""])
                 continue
+            out_pitch = n.pitch + transpose.get(ch, 0)
             w.writerow([ch, n.start, n.gate_end, n.end, n.gate_end - n.start, n.end - n.gate_end,
-                        note_name(n.pitch), n.pitch, n.peak, n.cue,
+                        note_name(out_pitch), out_pitch, n.peak, n.cue,
                         tmap(n.start) if tmap else "", tmap(n.gate_end) if tmap else "",
                         " ".join(f"{v:X}" for v in n.vols[:48])])
 
@@ -306,12 +308,15 @@ def main():
     ap.add_argument("--rows-per-beat", type=int, default=None, help="override rows per beat (e.g. 4 = 16th rows)")
     ap.add_argument("--loops", type=int, default=1, help="how many times to write the loop body (default 1)")
     ap.add_argument("--no-loop", action="store_true", help="disable loop detection (emulate --seconds fully)")
+    ap.add_argument("--tri-octave", type=int, default=-1,
+                    help="octave shift for triangle notes in the MIDI (default -1)")
     ap.add_argument("--no-tri-drums", action="store_true", help="keep triangle glide drums as triangle notes")
     ap.add_argument("--drum-map", default="",
                     help='override drum notes, e.g. "3:0=42,12:0=36,DMC:E000:129:15=38" '
                          "(noise: periodIdx:mode, DPCM: DMC:addrHex:len:rate)")
     args = ap.parse_args()
     drum_map = parse_drum_map(args.drum_map)
+    transpose = {"TRI": 12 * args.tri_octave}
 
     player = NSFPlayer(args.nsf)
     h = player.header
@@ -343,8 +348,11 @@ def main():
                 break
             continue
         frames, notes, stats, drums, events, loop = analyze(player, n_frames, args, drum_map)
-        # accept a loop only when it is stable over two chunks and confirmed by enough repeats
-        if loop and prev_loop and abs(loop["start"] - prev_loop["start"]) <= 2                 and abs(loop["period"] - prev_loop["period"]) <= 2                 and n_frames - (loop["start"] + loop["period"]) >= max(loop["period"], CONFIRM_SEC * frame_rate):
+        # accept a loop only when it is stable over two chunks and heard LOOP_REPEATS times in a row
+        if (loop and prev_loop and abs(loop["start"] - prev_loop["start"]) <= 2
+                and abs(loop["period"] - prev_loop["period"]) <= 2
+                and n_frames - loop["start"] >= max(LOOP_REPEATS * loop["period"],
+                                                    loop["period"] + CONFIRM_SEC * frame_rate)):
             end_reason = "loop found"
             break
         prev_loop = loop
@@ -414,10 +422,10 @@ def main():
             if sg.score < 0.8:
                 print("    Warning: poor grid fit (rubato or unsupported rhythm?)")
         tmap = TickMap(tempo, PPQ, not args.no_quantize)
-        write_smf(stem + ".mid", build_midi(notes, drums, tmap, h.title, track, end_frame, loop), PPQ)
+        write_smf(stem + ".mid", build_midi(notes, drums, tmap, h.title, track, end_frame, loop, transpose), PPQ)
         outputs.insert(0, stem + ".mid")
 
-    write_notes_csv(stem + "_notes.csv", notes, drums, tmap)
+    write_notes_csv(stem + "_notes.csv", notes, drums, tmap, transpose)
     outputs.append(stem + "_notes.csv")
     print("\nOutput:")
     for o in outputs:
