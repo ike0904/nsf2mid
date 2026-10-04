@@ -1,0 +1,7 @@
+testdata/
+nsf2mid_out/
+__pycache__/
+*.pyc
+build/
+dist/
+*.md.bak
