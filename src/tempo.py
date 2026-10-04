@@ -120,6 +120,57 @@ def choose_rows(unit, frame_rate, ternary, prefer_bpm=None):
     return family[0]
 
 
+def beat_fit(onsets, period, tol=0.75):
+    """Best-phase grid fit (exhaustive over onset residues, unlike the circular mean this
+    works for multi-modal patterns such as shuffles). Returns (norm, score, phase)."""
+    if not onsets:
+        return 0.0, 0.0, 0.0
+    res = [o % period for o in onsets]
+    best = (0, 0.0)
+    for ph in set(round(r * 4) / 4 for r in res):
+        hit = 0
+        for r in res:
+            d = abs(r - ph)
+            if min(d, period - d) <= tol:
+                hit += 1
+        if hit > best[0]:
+            best = (hit, ph)
+    score = best[0] / len(onsets)
+    chance = min(0.999, 2 * tol / period)
+    return (score - chance) / (1 - chance), score, best[1]
+
+
+BASS_SWITCH_FIT = 0.85    # bass fits an alternative beat at least this well ...
+BASS_KEEP_FIT = 0.6       # ... while it fits the default beat worse than this
+BASS_MIN_NOTES = 12
+
+
+def bass_beat(bass, unit, rows, frame_rate):
+    """Alternative rows-per-beat suggested by the bass line, or None.
+
+    Example: Super Mario USA overworld - grid unit 2 frames; the default ternary choice is
+    12 rows (24 frames, 150 BPM) but the triangle bass sits on an 18-frame beat (200 BPM)
+    with the melody on triplets (6 frames) in between.
+    """
+    if len(bass) < BASS_MIN_NOTES:
+        return None
+    cur = beat_fit(bass, unit * rows)[1]
+    if cur >= BASS_KEEP_FIT:
+        return None
+    best = None
+    m = 1
+    while True:
+        bpm = 60.0 * frame_rate / (unit * m)
+        if bpm < BPM_LO:
+            break
+        if bpm < 240.0:
+            sc = beat_fit(bass, unit * m)[1]
+            if sc >= BASS_SWITCH_FIT:
+                best = m            # keep the largest qualifying beat (slowest tempo)
+        m += 1
+    return best
+
+
 class Segment:
     def __init__(self, start, unit, phase, score):
         self.start = start      # first onset frame belonging to the segment
@@ -128,12 +179,13 @@ class Segment:
         self.score = score
         self.rows = 4
         self.bpm = 0.0
+        self.bass_beat = False
 
     def __repr__(self):
         return f"Segment(start={self.start}, unit={self.unit:.4g}, bpm={self.bpm:.2f}, fit={self.score:.2f})"
 
 
-def detect_tempo_map(onsets, frame_rate, rows_per_beat=None, unit=None):
+def detect_tempo_map(onsets, frame_rate, rows_per_beat=None, unit=None, bass=None):
     onsets = sorted(set(onsets))
     if len(onsets) < 4:
         return None
@@ -151,6 +203,12 @@ def detect_tempo_map(onsets, frame_rate, rows_per_beat=None, unit=None):
             s.rows = rows_per_beat
         else:
             s.rows = choose_rows(s.unit, frame_rate, ternary, prev)
+            if bass:
+                nxt = segs[segs.index(s) + 1].start if s is not segs[-1] else float("inf")
+                alt = bass_beat([b for b in bass if s.start <= b < nxt], s.unit, s.rows, frame_rate)
+                if alt:
+                    s.rows = alt
+                    s.bass_beat = True
         s.bpm = 60.0 * frame_rate / (s.unit * s.rows)
         prev = s.bpm
     return {"global": g, "segments": segs, "ternary": ternary}
@@ -261,7 +319,12 @@ class TickMap:
         prev = None
         for s in tmap["segments"]:
             tpu = ppq / s.rows
-            origin = s.phase + s.unit * round((s.start - s.phase) / s.unit)
+            if prev is None:
+                # keep the leading silence: the song starts at frame 0 (drivers start the sequence
+                # on the first PLAY call), so the first grid point at/near frame 0 is tick 0
+                origin = s.phase + s.unit * round((0 - s.phase) / s.unit)
+            else:
+                origin = s.phase + s.unit * round((s.start - s.phase) / s.unit)
             if prev is not None:
                 tick = prev[3] + round((origin - prev[1]) / prev[2]) * prev[4]
             part = (s.start, origin, s.unit, tick, tpu, s.bpm)
