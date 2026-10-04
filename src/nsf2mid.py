@@ -15,9 +15,10 @@ Usage:
   v0.1.1 (2026-10-04) - $4015 読み出し対応 (オホーツクに消ゆ等)・Phase 2: ノート抽出・テンポ検出・MIDI 出力
   v0.1.2 (2026-10-04) - Phase 3: ノイズ/DPCM/三角波ドラム・ループ/曲終端検出・分割エミュレーション
   v0.1.3 (2026-10-04) - ループ確定を 3 回連続一致に変更 (2 ループ後にサビが入る曲への対策)・三角波を 1 オクターブ下げて出力 (--tri-octave)
+  v0.1.4 (2026-10-04) - 三角波のオクターブを元に戻す (--tri-octave 既定 0)
 """
 
-APP_VERSION = "v0.1.3"
+APP_VERSION = "v0.1.4"
 
 import argparse
 import csv
@@ -308,8 +309,8 @@ def main():
     ap.add_argument("--rows-per-beat", type=int, default=None, help="override rows per beat (e.g. 4 = 16th rows)")
     ap.add_argument("--loops", type=int, default=1, help="how many times to write the loop body (default 1)")
     ap.add_argument("--no-loop", action="store_true", help="disable loop detection (emulate --seconds fully)")
-    ap.add_argument("--tri-octave", type=int, default=-1,
-                    help="octave shift for triangle notes in the MIDI (default -1)")
+    ap.add_argument("--tri-octave", type=int, default=0,
+                    help="octave shift for triangle notes in the MIDI (default 0 = APU pitch)")
     ap.add_argument("--no-tri-drums", action="store_true", help="keep triangle glide drums as triangle notes")
     ap.add_argument("--drum-map", default="",
                     help='override drum notes, e.g. "3:0=42,12:0=36,DMC:E000:129:15=38" '
