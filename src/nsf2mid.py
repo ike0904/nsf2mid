@@ -16,9 +16,10 @@ Usage:
   v0.1.2 (2026-10-04) - Phase 3: ノイズ/DPCM/三角波ドラム・ループ/曲終端検出・分割エミュレーション
   v0.1.3 (2026-10-04) - ループ確定を 3 回連続一致に変更 (2 ループ後にサビが入る曲への対策)・三角波を 1 オクターブ下げて出力 (--tri-octave)
   v0.1.4 (2026-10-04) - 三角波のオクターブを元に戻す (--tri-octave 既定 0)
+  v0.1.5 (2026-10-04) - 三角波の GM 音色を 38→80 (Sibelius での移調表示・トラック並べ替え対策)・--programs
 """
 
-APP_VERSION = "v0.1.4"
+APP_VERSION = "v0.1.5"
 
 import argparse
 import csv
@@ -39,7 +40,10 @@ from loop import detect_loop, REPEATS as LOOP_REPEATS  # noqa: E402
 
 PPQ = 480
 MIDI_CH = {"P1": 0, "P2": 1, "TRI": 2}
-MIDI_PROG = {"P1": 80, "P2": 80, "TRI": 38}   # GM: Lead 1 (square), Synth Bass 1
+# GM programs (0-based). All tonal tracks use Lead 1 (square): a non-transposing instrument of one family,
+# so notation software (Sibelius) neither transposes the triangle (bass = written an octave up)
+# nor re-sorts the tracks by instrument family.
+MIDI_PROG = {"P1": 80, "P2": 80, "TRI": 80}
 CHUNK_SEC = 60.0      # emulate in chunks; stop when a loop or the end of the song is found
 SILENCE_SEC = 4.0     # this much silence after the last note = song ended
 CONFIRM_SEC = 20.0    # at least this much repeat after the first loop (short loops)
@@ -211,7 +215,7 @@ TRACK_NAMES = {"P1": "Pulse 1", "P2": "Pulse 2", "TRI": "Triangle"}
 DRUM_TRACKS = (("NOI", "Drums (noise)"), ("DMC", "Drums (DPCM)"), ("TRI", "Drums (triangle)"))
 
 
-def build_midi(notes, drums, tmap, title, track_no, end_frame, loop, transpose):
+def build_midi(notes, drums, tmap, title, track_no, end_frame, loop, transpose, programs):
     t0 = Track(f"{title} #{track_no}" if title else f"track {track_no}")
     for tick, bpm in tmap.tempo_events():
         t0.tempo(tick, bpm)
@@ -233,7 +237,8 @@ def build_midi(notes, drums, tmap, title, track_no, end_frame, loop, transpose):
     for ch in ("P1", "P2", "TRI"):
         tr = Track(TRACK_NAMES[ch])
         mch = MIDI_CH[ch]
-        tr.program(0, mch, MIDI_PROG[ch])
+        if programs.get(ch) is not None:
+            tr.program(0, mch, programs[ch])
         if loop and ch == "P1":
             tr.control(tmap(loop["start"]), mch, 111, 0)   # RPG Maker style loop marker
         for n in notes[ch]:
@@ -311,6 +316,9 @@ def main():
     ap.add_argument("--no-loop", action="store_true", help="disable loop detection (emulate --seconds fully)")
     ap.add_argument("--tri-octave", type=int, default=0,
                     help="octave shift for triangle notes in the MIDI (default 0 = APU pitch)")
+    ap.add_argument("--programs", default="",
+                    help='GM programs (0-based) for P1,P2,TRI, e.g. "80,80,38"; "-" = no program change '
+                         '(default 80,80,80)')
     ap.add_argument("--no-tri-drums", action="store_true", help="keep triangle glide drums as triangle notes")
     ap.add_argument("--drum-map", default="",
                     help='override drum notes, e.g. "3:0=42,12:0=36,DMC:E000:129:15=38" '
@@ -318,6 +326,11 @@ def main():
     args = ap.parse_args()
     drum_map = parse_drum_map(args.drum_map)
     transpose = {"TRI": 12 * args.tri_octave}
+    programs = dict(MIDI_PROG)
+    if args.programs:
+        for ch, v in zip(("P1", "P2", "TRI"), args.programs.split(",")):
+            v = v.strip()
+            programs[ch] = None if v == "-" else int(v)
 
     player = NSFPlayer(args.nsf)
     h = player.header
@@ -423,7 +436,7 @@ def main():
             if sg.score < 0.8:
                 print("    Warning: poor grid fit (rubato or unsupported rhythm?)")
         tmap = TickMap(tempo, PPQ, not args.no_quantize)
-        write_smf(stem + ".mid", build_midi(notes, drums, tmap, h.title, track, end_frame, loop, transpose), PPQ)
+        write_smf(stem + ".mid", build_midi(notes, drums, tmap, h.title, track, end_frame, loop, transpose, programs), PPQ)
         outputs.insert(0, stem + ".mid")
 
     write_notes_csv(stem + "_notes.csv", notes, drums, tmap, transpose)
