@@ -4,8 +4,10 @@ nsf2mid - NSF to MIDI converter (derived from morokoshi)
 Phase 1: 6502 emulation + APU register log / per-frame channel state dump.
 Phase 2: note extraction (P1/P2/TRI), tempo detection, quantized MIDI output.
 Phase 3: drums (noise / DPCM / triangle glides -> GM percussion), loop / end detection.
+Phase 4: GUI (nsf2mid_gui.py). Started when no arguments are given.
 
 Usage:
+    python nsf2mid.py                (GUI)
     python nsf2mid.py FILE.nsf [-t TRACK] [-s SECONDS] [-o OUTDIR] [--info] [--dump]
                       [--keep-tail] [--no-quantize] [--unit FRAMES] [--rows-per-beat N]
                       [--loops N] [--no-loop] [--no-tri-drums] [--drum-map MAP]
@@ -23,9 +25,10 @@ Usage:
   v0.1.9 (2026-10-04) - 冒頭の空白を保持・ベースラインからの拍判定 (マリオUSA 地上: 200 BPM、3 連 2 個分の休符)
   v0.1.10 (2026-10-04) - シャッフル (長短 2:1 の交互) 検出 (マリオ3: 200 BPM 3 連)・ベースライン拍判定は廃止
   v0.1.11 (2026-10-04) - 拍子検出 (6/8・4/4)・リタルダンド/フェルマータ追従・区間境目のフレーズ優先・3 連系の拍選択 (マリオ 200 BPM)
+  v0.1.12 (2026-10-05) - Phase 4: GUI (nsf2mid_gui.py、引数なしで起動)・変換処理を convert() に分離 (中止対応)
 """
 
-APP_VERSION = "v0.1.11"
+APP_VERSION = "v0.1.12"
 
 import argparse
 import csv
@@ -309,7 +312,11 @@ def analyze(player, n_frames, args, drum_map):
     return frames, notes, stats, drums, events, loop
 
 
-def main():
+class Cancelled(Exception):
+    """Raised when the GUI asks to stop a conversion."""
+
+
+def build_parser():
     ap = argparse.ArgumentParser(description=f"nsf2mid {APP_VERSION} - NSF to MIDI converter")
     ap.add_argument("nsf", help="input .nsf file")
     ap.add_argument("-t", "--track", type=int, default=0, help="track number (1-based, default: start song)")
@@ -335,7 +342,15 @@ def main():
     ap.add_argument("--drum-map", default="",
                     help='override drum notes, e.g. "3:0=42,12:0=36,DMC:E000:129:15=38" '
                          "(noise: periodIdx:mode, DPCM: DMC:addrHex:len:rate)")
-    args = ap.parse_args()
+    return ap
+
+
+def convert(args, should_stop=None):
+    """Convert one track as described by the parsed arguments.
+
+    Progress is printed to stdout. should_stop() is polled between emulation chunks;
+    returning True raises Cancelled. Returns (exit code, list of output files).
+    """
     drum_map = parse_drum_map(args.drum_map)
     transpose = {"TRI": 12 * args.tri_octave}
     programs = dict(MIDI_PROG)
@@ -349,12 +364,12 @@ def main():
     print(f"nsf2mid {APP_VERSION}")
     print(h.summary())
     if args.info:
-        return 0
+        return 0, []
 
     track = args.track or h.start_song
     if not 1 <= track <= h.total_songs:
         print(f"Error: track {track} out of range 1..{h.total_songs}")
-        return 1
+        return 1, []
 
     frame_rate = player.cpu_hz / player.frame_cycles
     max_frames = int(args.seconds * frame_rate)
@@ -366,6 +381,8 @@ def main():
     end_reason = "max length"
     prev_loop = None
     while n_frames < max_frames:
+        if should_stop and should_stop():
+            raise Cancelled()
         n_frames = player.advance(min(chunk, max_frames - n_frames))
         if args.no_loop or player.aborted:
             if player.aborted:
@@ -460,7 +477,16 @@ def main():
     print("\nOutput:")
     for o in outputs:
         print(f"  {o}")
-    return 0
+    return 0, outputs
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv:
+        # no arguments: start the GUI (Phase 4)
+        from nsf2mid_gui import main as gui_main
+        return gui_main()
+    return convert(build_parser().parse_args(argv))[0]
 
 
 if __name__ == "__main__":
