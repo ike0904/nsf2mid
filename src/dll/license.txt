@@ -1,0 +1,43 @@
+=============================================================
+  nsf2mid - Third-Party Library License Notices
+=============================================================
+
+------------------------------------------------------
+  Game_Music_Emu (libgme)  --  libgme.dll
+------------------------------------------------------
+This application uses a modified version of Game_Music_Emu
+(libgme), licensed under the GNU Lesser General Public
+License v2.1 (LGPL v2.1).
+
+Modified source code (this build):
+  https://github.com/ike0904/game-music-emu-morokoshi
+
+Original upstream repository:
+  https://github.com/libgme/game-music-emu
+
+In accordance with the LGPL, libgme.dll is provided as a
+separate file so that you may replace it with your own
+build of the library.
+
+The full text of the LGPL v2.1 can be found at:
+  https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
+
+------------------------------------------------------
+  GCC Runtime  --  libgcc_s_seh-1.dll, libstdc++-6.dll
+------------------------------------------------------
+Licensed under the GNU General Public License v3 with the
+GCC Runtime Library Exception.
+  https://www.gnu.org/licenses/gcc-exception-3.1.en.html
+
+------------------------------------------------------
+  winpthreads  --  libwinpthread-1.dll
+------------------------------------------------------
+Licensed under the MIT License / BSD License.
+
+------------------------------------------------------
+  zlib  --  zlib1.dll
+------------------------------------------------------
+Licensed under the zlib License.
+  https://zlib.net/zlib_license.html
+
+=============================================================

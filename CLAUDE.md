@@ -9,7 +9,7 @@
 このプロジェクトは morokoshi フォルダで起動した会話の中で作成した。以下はその会話からの引き継ぎ。
 
 ### 現状
-- Phase 1〜4 完了（v0.1.12）。Phase 4（GUI）は初版。ユーザーは MIDI の品質調整も継続中
+- Phase 1〜4 完了（v0.1.13）。Phase 4（GUI）は初版＋簡易再生。ユーザーは MIDI の品質調整も継続中
 - 起動は `openClaude.bat`。GitHub: https://github.com/ike0904/nsf2mid（公開）
 
 ### ユーザー確認待ち
@@ -26,6 +26,7 @@
 - 冒頭の空白は音楽的に必要なので保持する（マリオ USA: 3 連 2 個分）
 - 3 連ノリ（シャッフル）は 3 連として出す（マリオ 3、マリオ USA は 200 BPM）
 - 拡張音源（VRC6 等）は後回し
+- GUI の見た目は morokoshi（E:\Users\takashi\Desktop\ClaudeCode\morokoshi）に近づける。今後も同様（v0.1.13 で指示）
 
 ### テストデータ
 - NSF 1934 本: `E:\Users\takashi\Desktop\ClaudeCode\morokoshi\tmp\nsf_downloads\*.zip`
@@ -38,7 +39,18 @@
 
 ## 作業記録
 
-### v0.1.12 (2026-10-05) ← 最新
+### v0.1.13 (2026-10-08) ← 最新
+- GUI の見た目を morokoshi に合わせた（プロンプト指示。今後も同様）
+  - 配色（BG #2B2B2B / BG2 #3C3F41 / BG3 #4C5052 / FG #BBBBBB / 枠 #555555）、Consolas、Fusion、押下中は黄色 #FFD700
+  - 表・グループ枠・スピンボックス・コンボ・チェックボックス・進捗バーも同じ配色に（矢印は src/icon/*.svg）
+- 簡易再生を追加（プロンプト指示。「再生/一時停止」「曲頭に戻る」の 2 ボタン）
+  - src/player.py: morokoshi と同じ libgme.dll（src/dll/ にコピー、license.txt 同梱）を ctypes で呼び、sounddevice へ出力
+  - 選択中の行の曲を再生。再生中は再生ボタンが黄色、経過時間を mm:ss.t で表示
+  - 再生アイコンは morokoshi の play_pause 画像、曲頭アイコンは同じ太さで描画
+- 動作確認: DQ2 t01 を GUI から再生→一時停止→曲頭（時間 0 に戻る）、音声出力あり（ピーク 0.59）
+- 変換ロジックに変更がないため regress.py・nsf2mid_out の作り直しは実施せず
+
+### v0.1.12 (2026-10-05)
 - Phase 4: GUI 初版（プロンプト指示「phase4おねがい」）
   - src/nsf2mid_gui.py（PyQt6。morokoshi と同じ）。起動は nsf2mid.bat / 引数なしの nsf2mid.py
   - NSF を開く・ドラッグ＆ドロップ、m3u から曲名・長さ・プレイリスト順を表示、チェックした曲を一括変換

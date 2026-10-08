@@ -25,7 +25,10 @@ morokoshi の派生アプリ。NSF（ファミコン音楽ファイル）を読�
 | ファイル | 役割 |
 |:---|:---|
 | `nsf2mid.py` | CLI エントリ。`APP_VERSION` を保持。MIDI 構築・各種出力。`convert(args)` が 1 曲分の変換（GUI からも使用）。引数なしで GUI を起動 |
-| `nsf2mid_gui.py` | GUI（PyQt6、未インストールなら自動 pip install） |
+| `nsf2mid_gui.py` | GUI（PyQt6、未インストールなら自動 pip install）。見た目は morokoshi に合わせる |
+| `player.py` | GUI の簡易再生（libgme を ctypes で呼び sounddevice へ出力） |
+| `dll/` | libgme.dll と依存 DLL（morokoshi と同じビルド）、license.txt |
+| `icon/` | GUI のアイコン（play_pause.png は morokoshi の埋め込みアイコンと同じ画像、スピンボックスの矢印 SVG） |
 | `cpu6502.py` | 6502 CPU コア（2A03: 10進モードなし、主要な非公式命令対応） |
 | `nsf.py` | NSF ヘッダ解析・メモリマップ・バンク切替・INIT/PLAY 呼び出し・レジスタ書き込み記録。`$4015` 読み出しはライブ APU モデルから返す |
 | `apu_state.py` | APU 状態モデル（長さカウンタ・エンベロープ・スイープ・線形カウンタ・フレームシーケンサ・DMC 再生区間）。音声合成はしない |
@@ -96,6 +99,12 @@ python src/nsf2mid.py FILE.nsf [-t TRACK] [-s SECONDS] [-o OUTDIR] [--info] [--d
   - 結果欄: テンポ（BPM の範囲）・拍子・ループ（イントロ＋ループ長）または曲終了の長さ。エラー時は「エラー（ログ参照）」
   - 「中止」: エミュレーションの区切り（60 秒分ごと）で止まる。残りの曲は「中止」
   - 変換済みの行をダブルクリックで MIDI を既定のアプリで開く。「出力フォルダを開く」
+- **簡易再生**（v0.1.13）: 曲一覧の下の「曲頭に戻る」「再生/一時停止」ボタン。選択中の行の曲を libgme で再生する（morokoshi と同じ DLL）
+  - 再生中は再生ボタンが黄色、経過時間を mm:ss.t で表示。別の行を選んで再生ボタンを押すと、その曲を頭から再生
+  - 先読みレンダリングはせず、オーディオコールバック内で libgme を回す（一時停止はエミュレータの状態を保持）
+  - 曲の終わり（libgme の無音検出）で停止。もう一度押すと頭から再生
+- **見た目**（v0.1.13）: morokoshi に合わせる（フラットグレーの配色 BG #2B2B2B / 入力欄 #4C5052 / 文字 #BBBBBB、Consolas、
+  押下中は黄色 #FFD700、Fusion スタイル）。今後の GUI 変更も morokoshi に合わせる
 - 設定（オプション・最後に開いたフォルダ・ウィンドウ位置）は `%APPDATA%\nsf2mid\settings.json` に保存。「既定値に戻す」あり
 
 ## Phase 2 ノート判定

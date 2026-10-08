@@ -28,7 +28,7 @@ Usage:
   v0.1.12 (2026-10-05) - Phase 4: GUI (nsf2mid_gui.py、引数なしで起動)・変換処理を convert() に分離 (中止対応)
 """
 
-APP_VERSION = "v0.1.12"
+APP_VERSION = "v0.1.13"
 
 import argparse
 import csv

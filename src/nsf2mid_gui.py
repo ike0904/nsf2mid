@@ -6,6 +6,9 @@ convert. Track names and lengths are read from an .m3u playlist (nsfe2m3u / GME 
 in the same folder when there is one. Each track is converted with the same code as the CLI
 (nsf2mid.convert) in a worker thread; its console output is shown in the log pane.
 
+The selected track can be played back (play/pause, back to start) with libgme, the same way
+as morokoshi. The look (colours, font, buttons) follows morokoshi.
+
 Usage:
     python nsf2mid_gui.py [FILE.nsf]
     python nsf2mid.py            (no arguments also starts the GUI)
@@ -22,6 +25,8 @@ def ensure_package(pkg, import_name=None):
 
 
 ensure_package("PyQt6")
+ensure_package("numpy")
+ensure_package("sounddevice")
 
 import contextlib  # noqa: E402
 import json  # noqa: E402
@@ -29,8 +34,10 @@ import os  # noqa: E402
 import re  # noqa: E402
 import traceback  # noqa: E402
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal  # noqa: E402
-from PyQt6.QtGui import QFont, QColor  # noqa: E402
+import numpy as np  # noqa: E402
+
+from PyQt6.QtCore import Qt, QThread, QTimer, QSize, QPointF, pyqtSignal  # noqa: E402
+from PyQt6.QtGui import QColor, QIcon, QImage, QPixmap, QPainter, QPolygonF  # noqa: E402
 from PyQt6.QtWidgets import (  # noqa: E402
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
     QLabel, QLineEdit, QPushButton, QSpinBox, QComboBox, QCheckBox, QTableWidget,
@@ -42,11 +49,121 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import nsf2mid  # noqa: E402
 from nsf import NSFHeader  # noqa: E402
+from player import NsfPlayer  # noqa: E402
 
 SETTINGS_PATH = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "nsf2mid", "settings.json")
 ROWS_PER_BEAT = ("auto", "2", "3", "4", "6", "8", "9", "12", "16", "24")
 
 COL_CHECK, COL_NO, COL_TITLE, COL_LEN, COL_RESULT = range(5)
+
+# ---------------------------------------------------------------- theme (same as morokoshi)
+
+BG = "#2B2B2B"       # background
+BG2 = "#3C3F41"      # panel / hover
+BG3 = "#4C5052"      # input fields
+FG = "#BBBBBB"       # text
+FG2 = "#888888"      # dim text
+ACC = "#4A90D9"      # accent
+SEL = "#214283"      # selection
+BORDER = "#555555"
+RED_HL = "#CC3333"
+GOLD = "#FFD700"     # pressed / active
+
+ICON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon")
+_ICON_URL = ICON_DIR.replace("\\", "/")
+
+
+def app_stylesheet():
+    """morokoshi's app_stylesheet, plus the standard widgets this window uses."""
+    return (
+        f"* {{font-family:Consolas,'MS Gothic','Courier New',monospace; font-size:13px; color:{FG}; background:{BG};}}"
+        f"QMainWindow, QWidget {{background:{BG};}}"
+        f"QLineEdit, QSpinBox, QComboBox {{background:{BG3}; border:1px solid {BORDER}; padding:2px 4px;}}"
+        f"QLineEdit:hover, QSpinBox:hover, QComboBox:hover {{border:1px solid {FG2};}}"
+        f"QLineEdit:focus, QSpinBox:focus, QComboBox:focus {{border:1px solid {GOLD};}}"
+        f"QSpinBox::up-button, QSpinBox::down-button {{background:{BG2}; border:none; width:16px;}}"
+        f"QSpinBox::up-button:hover, QSpinBox::down-button:hover {{background:{BORDER};}}"
+        f"QSpinBox::up-arrow {{image:url({_ICON_URL}/arrow_up.svg); width:8px; height:5px;}}"
+        f"QSpinBox::down-arrow, QComboBox::down-arrow {{image:url({_ICON_URL}/arrow_down.svg); width:8px; height:5px;}}"
+        f"QComboBox::drop-down {{background:{BG2}; border:none; width:16px;}}"
+        f"QComboBox QAbstractItemView {{background:{BG3}; selection-background-color:{SEL}; border:1px solid {BORDER};}}"
+        f"QPushButton {{color:{FG}; background:{BG3}; border:1px solid {BORDER}; border-radius:3px; padding:3px 10px;}}"
+        f"QPushButton:hover {{background:{BG2}; border:1px solid {FG2};}}"
+        f"QPushButton:pressed {{color:{GOLD}; border:1px solid {GOLD};}}"
+        f"QPushButton:disabled {{color:{FG2}; background:{BG}; border:1px solid {BORDER};}}"
+        f"QGroupBox {{border:1px solid {BORDER}; border-radius:3px; margin-top:10px; padding-top:6px;}}"
+        f"QGroupBox::title {{subcontrol-origin:margin; left:8px; padding:0 4px; color:{FG2};}}"
+        f"QCheckBox::indicator, QTableWidget::indicator {{width:13px; height:13px; background:{BG3}; border:1px solid {BORDER};}}"
+        f"QCheckBox::indicator:hover, QTableWidget::indicator:hover {{border:1px solid {FG2};}}"
+        f"QCheckBox::indicator:checked, QTableWidget::indicator:checked {{background:{GOLD}; border:1px solid {GOLD};}}"
+        f"QTableWidget {{background:{BG}; alternate-background-color:{BG2}; border:1px solid {BORDER};"
+        f" selection-background-color:{SEL}; selection-color:{FG};}}"
+        f"QHeaderView::section {{background:{BG2}; color:{FG2}; border:none; border-right:1px solid {BORDER};"
+        f" border-bottom:1px solid {BORDER}; padding:2px 4px;}}"
+        f"QPlainTextEdit {{background:{BG}; border:1px solid {BORDER};}}"
+        f"QProgressBar {{background:{BG3}; border:1px solid {BORDER}; text-align:center;}}"
+        f"QProgressBar::chunk {{background:{ACC};}}"
+        f"QScrollBar {{background:{BG2};}}"
+        f"QToolTip {{background:#FFFFCC; color:#000; border:1px solid #888; padding:3px 6px;}}"
+    )
+
+
+_ICON_CACHE = {}
+
+
+def get_icon(name, size, color):
+    """Icon tinted with color. play_pause is morokoshi's image; to_start is drawn here."""
+    key = (name, size, color)
+    if key in _ICON_CACHE:
+        return _ICON_CACHE[key]
+    if name == "to_start":
+        # |◀ in the same proportions as morokoshi's rew / play_pause icons (150 px design)
+        pm = QPixmap(150, 150)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(color))
+        p.drawRoundedRect(28, 38, 18, 74, 6, 6)
+        p.drawPolygon(QPolygonF([QPointF(122, 38), QPointF(122, 112), QPointF(52, 75)]))
+        p.end()
+        img = pm.toImage()
+    else:
+        # replace RGB, keep alpha (morokoshi's _tint_qimage)
+        img = QImage(os.path.join(ICON_DIR, f"{name}.png")).convertToFormat(QImage.Format.Format_ARGB32)
+        ptr = img.bits()
+        ptr.setsize(img.height() * img.width() * 4)
+        arr = np.frombuffer(ptr, dtype=np.uint8).reshape((img.height(), img.width(), 4)).copy()
+        c = QColor(color)
+        arr[:, :, 0], arr[:, :, 1], arr[:, :, 2] = c.blue(), c.green(), c.red()
+        img = QImage(arr.tobytes(), img.width(), img.height(), QImage.Format.Format_ARGB32).copy()
+    img = img.scaled(size, size, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    ico = QIcon(QPixmap.fromImage(img))
+    _ICON_CACHE[key] = ico
+    return ico
+
+
+def icon_button(name, tip, slot):
+    """32x32 flat icon button like morokoshi's _mk_icon_btn (yellow while pressed)."""
+    b = QPushButton()
+    b.setToolTip(tip)
+    b.setIcon(get_icon(name, 28, FG))
+    b.setIconSize(QSize(28, 28))
+    b.setFixedSize(32, 32)
+    b.setStyleSheet("QPushButton{background:transparent; border:none; border-radius:4px;}"
+                    f"QPushButton:hover{{background:{BG2};}}")
+    b.setCursor(Qt.CursorShape.PointingHandCursor)
+    b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    b.base_color = FG
+    b.pressed.connect(lambda: b.setIcon(get_icon(name, 28, GOLD)))
+    b.released.connect(lambda: b.setIcon(get_icon(name, 28, b.base_color)))
+    b.clicked.connect(slot)
+    return b
+
+
+def fmt_time(sec):
+    """morokoshi's time format: mm:ss.t"""
+    return f"{int(sec) // 60:02d}:{sec % 60:04.1f}"
 
 
 # ---------------------------------------------------------------- m3u playlist
@@ -258,6 +375,10 @@ class MainWindow(QMainWindow):
         self.last_outdir = None
         self.m3u_tracks = set()
         self.settings = self._load_settings()
+        self.player = NsfPlayer()
+        self.play_timer = QTimer(self)
+        self.play_timer.setInterval(50)
+        self.play_timer.timeout.connect(self._update_play)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -303,7 +424,10 @@ class MainWindow(QMainWindow):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.cellDoubleClicked.connect(self.on_row_double_clicked)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
         tr_l.addWidget(self.table)
+        tr_l.addLayout(self._build_player())
         brow = QHBoxLayout()
         for text, fn in (("すべて選択", lambda: self.set_checks("all")),
                          ("m3u の曲を選択", lambda: self.set_checks("m3u")),
@@ -342,9 +466,6 @@ class MainWindow(QMainWindow):
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        f = QFont("Consolas")
-        f.setStyleHint(QFont.StyleHint.Monospace)
-        self.log.setFont(f)
         log_l.addWidget(self.log, 1)
         split.addWidget(log_box)
         split.setSizes([420, 300])
@@ -352,6 +473,95 @@ class MainWindow(QMainWindow):
         self._apply_settings()
         if initial:
             self.load_nsf(initial)
+
+    # ------------------------------------------------------------ playback
+
+    def _build_player(self):
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        self.bt_start = icon_button("to_start", "曲頭に戻る", self.on_to_start)
+        self.bt_play = icon_button("play_pause", "再生 / 一時停止（選択中の曲）", self.on_play_pause)
+        self.lb_pos = QLabel(fmt_time(0))
+        self.lb_pos.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lb_pos.setFixedSize(72, 22)
+        self.lb_pos.setStyleSheet(f"QLabel{{color:{FG}; border:1px solid {BORDER}; background:{BG3}; padding:1px 4px;}}")
+        self.lb_playing = QLabel("")
+        self.lb_playing.setStyleSheet(f"color:{FG2};")
+        row.addWidget(self.bt_start)
+        row.addWidget(self.bt_play)
+        row.addWidget(self.lb_pos)
+        row.addSpacing(6)
+        row.addWidget(self.lb_playing, 1)
+        if not self.player.available:
+            self.bt_start.setEnabled(False)
+            self.bt_play.setEnabled(False)
+            self.lb_playing.setText("再生不可（libgme.dll が見つかりません）")
+        return row
+
+    def _selected_track(self):
+        i = self.table.currentRow()
+        if i < 0 and self.table.rowCount():
+            i = 0
+        if i < 0:
+            return None
+        return self.table.item(i, COL_CHECK).data(Qt.ItemDataRole.UserRole)
+
+    def _load_track(self, track):
+        try:
+            ok = self.player.load(self.nsf_path, track)
+        except OSError as e:
+            ok, self.player.error = False, str(e)
+        if not ok:
+            self.append_log(f"Playback error: {self.player.error}")
+            self.lb_playing.setText("")
+            return False
+        row = self._row_of(track)
+        title = self.table.item(row, COL_TITLE).text() if row >= 0 else ""
+        self.lb_playing.setText(f"No.{track}  {title}".rstrip())
+        return True
+
+    def on_play_pause(self):
+        if not self.nsf_path:
+            return
+        track = self._selected_track()
+        if track is None:
+            return
+        if self.player.path != self.nsf_path or self.player.track != track:
+            # another track is selected: switch to it and play from the start
+            if not self._load_track(track):
+                return
+            self.player.play()
+        else:
+            self.player.toggle()
+        self.play_timer.start()
+        self._update_play()
+
+    def on_to_start(self):
+        if not self.nsf_path:
+            return
+        if self.player.track is None:
+            track = self._selected_track()
+            if track is None or not self._load_track(track):
+                return
+        else:
+            self.player.rewind()
+        self._update_play()
+
+    def _update_play(self):
+        self.player.poll()
+        self.lb_pos.setText(fmt_time(self.player.position_sec()))
+        color = GOLD if self.player.playing else FG
+        if self.bt_play.base_color != color:
+            self.bt_play.base_color = color
+            self.bt_play.setIcon(get_icon("play_pause", 28, color))
+        if not self.player.playing:
+            self.play_timer.stop()
+
+    def _stop_player(self):
+        self.player.close()
+        if self.player.available:
+            self.lb_playing.setText("")
+        self._update_play()
 
     # ------------------------------------------------------------ options
 
@@ -402,6 +612,7 @@ class MainWindow(QMainWindow):
         orow.addWidget(self.ed_outdir, 1)
         b = QPushButton("...")
         b.setFixedWidth(32)
+        b.setStyleSheet("padding:3px 0;")
         b.clicked.connect(self.on_pick_outdir)
         orow.addWidget(b)
         g.addWidget(QLabel("出力フォルダ"), r, 0)
@@ -523,6 +734,7 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError) as e:
             QMessageBox.warning(self, "nsf2mid", f"読み込めませんでした:\n{path}\n{e}")
             return
+        self._stop_player()
         self.nsf_path = os.path.abspath(path)
         self.header = hdr
         self.outputs = {}
@@ -531,7 +743,7 @@ class MainWindow(QMainWindow):
         info = f"<b>{_esc(hdr.title)}</b>　{_esc(hdr.artist)}　{_esc(hdr.copyright)}　" \
                f"曲数 {hdr.total_songs}（開始 {hdr.start_song}）　{'PAL' if hdr.is_pal else 'NTSC'}"
         if hdr.expansion_names:
-            info += f"　<span style='color:#c05000'>拡張音源 {', '.join(hdr.expansion_names)}" \
+            info += f"　<span style='color:#E08040'>拡張音源 {', '.join(hdr.expansion_names)}" \
                     f"（未対応: 2A03 の音のみ変換）</span>"
         self.lb_info.setText(info)
 
@@ -608,7 +820,7 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self.worker = ConvertWorker(self.nsf_path, tracks, argv)
         self.worker.log.connect(self.append_log)
-        self.worker.track_started.connect(lambda t: self._set_result(t, "変換中...", "#0060c0"))
+        self.worker.track_started.connect(lambda t: self._set_result(t, "変換中...", ACC))
         self.worker.track_done.connect(self.on_track_done)
         self.worker.finished.connect(self.on_worker_finished)
         self._set_running(True)
@@ -627,9 +839,9 @@ class MainWindow(QMainWindow):
             if outputs:
                 self.last_outdir = os.path.dirname(outputs[0])
         elif status == "cancel":
-            self._set_result(track, "中止", "#808080")
+            self._set_result(track, "中止", FG2)
         else:
-            self._set_result(track, "エラー（ログ参照）", "#c00000")
+            self._set_result(track, "エラー（ログ参照）", RED_HL)
         self.progress.setValue(self.progress.value() + 1)
 
     def on_worker_finished(self):
@@ -648,7 +860,7 @@ class MainWindow(QMainWindow):
             return
         it = self.table.item(i, COL_RESULT)
         it.setText(text)
-        it.setForeground(QColor(color) if color else self.palette().text().color())
+        it.setForeground(QColor(color or FG))
 
     def append_log(self, line):
         self.log.appendPlainText(line)
@@ -672,6 +884,7 @@ class MainWindow(QMainWindow):
         if self.worker:
             self.worker.stop()
             self.worker.wait(15000)
+        self.player.close()
         self._save_settings()
         super().closeEvent(e)
 
@@ -692,6 +905,8 @@ def _open_path(p):
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     app = QApplication.instance() or QApplication(sys.argv)
+    app.setStyle("Fusion")
+    app.setStyleSheet(app_stylesheet())
     w = MainWindow(argv[0] if argv else None)
     w.show()
     return app.exec()
