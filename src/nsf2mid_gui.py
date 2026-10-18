@@ -38,12 +38,13 @@ import zipfile  # noqa: E402
 import numpy as np  # noqa: E402
 
 from PyQt6.QtCore import Qt, QThread, QTimer, QSize, QPointF, pyqtSignal  # noqa: E402
-from PyQt6.QtGui import QColor, QIcon, QImage, QPixmap, QPainter, QPolygonF  # noqa: E402
+from PyQt6.QtGui import (QColor, QCursor, QIcon, QImage, QKeySequence, QPixmap, QPainter,  # noqa: E402
+                         QPolygonF, QShortcut)
 from PyQt6.QtWidgets import (  # noqa: E402
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
     QLabel, QLineEdit, QPushButton, QSpinBox, QComboBox, QCheckBox, QTableWidget,
     QTableWidgetItem, QHeaderView, QPlainTextEdit, QProgressBar, QFileDialog, QMessageBox,
-    QSplitter, QAbstractItemView,
+    QSplitter, QAbstractItemView, QFrame,
 )
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -53,6 +54,7 @@ from nsf import NSFHeader, read_nsf_bytes, zip_contents  # noqa: E402
 from player import NsfPlayer  # noqa: E402
 
 SETTINGS_PATH = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "nsf2mid", "settings.json")
+HISTORY_MAX = 10
 TRIPLETS = {"自動検出": "auto", "常にオン": "on", "常にオフ": "off"}   # --triplets
 ROWS_PER_BEAT = ("auto", "2", "3", "4", "6", "8", "9", "12", "16", "24")
 
@@ -160,10 +162,146 @@ def get_icon(name, size, color):
     return ico
 
 
+# ---------------------------------------------------------------- tooltip (same as morokoshi)
+
+_TT = None
+
+
+def show_tt(text, widget=None):
+    """morokoshi's custom tooltip: yellow label just below the widget (or at the cursor)."""
+    global _TT
+    if _TT is None:
+        _TT = QLabel()
+        _TT.setWindowFlags(Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint
+                           | Qt.WindowType.WindowStaysOnTopHint)
+        _TT.setStyleSheet("background:#FFFFCC; color:#000; border:1px solid #888; padding:3px 6px; font-size:12px;")
+        _TT.setMargin(2)
+    _TT.setText(text)
+    _TT.adjustSize()
+    if widget is not None:
+        gp = widget.mapToGlobal(widget.rect().bottomLeft())
+        _TT.move(gp.x(), gp.y() + 4)
+    else:
+        pos = QCursor.pos()
+        _TT.move(pos.x() + 14, pos.y() + 20)
+    _TT.show()
+
+
+def hide_tt():
+    if _TT:
+        _TT.hide()
+
+
+class TipButton(QPushButton):
+    """QPushButton with morokoshi's tooltip. on_right is called on a right click."""
+
+    def __init__(self, tip="", parent=None):
+        super().__init__(parent)
+        self._tip = tip
+        self.on_right = None
+
+    def enterEvent(self, e):
+        if self._tip:
+            show_tt(self._tip, self)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        hide_tt()
+        super().leaveEvent(e)
+
+    def mousePressEvent(self, e):
+        hide_tt()
+        if e.button() == Qt.MouseButton.RightButton and self.on_right:
+            self.on_right()
+            return
+        super().mousePressEvent(e)
+
+
+class FileHistoryPopup(QFrame):
+    """File history shown on a right click of the open button (morokoshi's FileHistoryPopup, max 10)."""
+    file_selected = pyqtSignal(str)
+
+    def __init__(self, paths, parent=None):
+        super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setStyleSheet(
+            f"FileHistoryPopup{{background:{BG2}; border:1px solid {BORDER};}}"
+            f"QPushButton{{background:transparent; color:{FG}; border:none; text-align:left;"
+            f" padding:5px 10px; font-size:13px;}}"
+            f"QPushButton:hover{{background:{BG3};}}")
+        lo = QVBoxLayout(self)
+        lo.setContentsMargins(0, 4, 0, 4)
+        lo.setSpacing(0)
+        if not paths:
+            lbl = QLabel("No history")
+            lbl.setStyleSheet(f"color:{FG2}; padding:5px 14px; font-size:13px; background:transparent;")
+            lo.addWidget(lbl)
+        for p in paths:
+            btn = QPushButton(os.path.basename(p))
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setMinimumWidth(260)
+            btn.clicked.connect(lambda _checked, pp=p: self._select(pp))
+            btn.enterEvent = lambda e, pp=p: show_tt(pp, self)
+            btn.leaveEvent = lambda e: hide_tt()
+            lo.addWidget(btn)
+
+    def _select(self, path):
+        hide_tt()
+        self.file_selected.emit(path)
+        self.close()
+
+    def hideEvent(self, e):
+        hide_tt()
+        super().hideEvent(e)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.RightButton:
+            self.close()
+        else:
+            super().mousePressEvent(e)
+
+
+class CheckHeader(QHeaderView):
+    """Horizontal header with a check-all / uncheck-all box in the check column."""
+    toggled = pyqtSignal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        self.state = Qt.CheckState.Unchecked
+        self.setSectionsClickable(True)
+
+    def set_state(self, state):
+        if state != self.state:
+            self.state = state
+            self.viewport().update()
+
+    def paintSection(self, painter, rect, index):
+        super().paintSection(painter, rect, index)
+        if index != COL_CHECK:
+            return
+        painter.save()
+        x = rect.x() + (rect.width() - 13) // 2
+        y = rect.y() + (rect.height() - 13) // 2
+        on = self.state == Qt.CheckState.Checked
+        painter.setPen(QColor(GOLD if on else BORDER))
+        painter.setBrush(QColor(GOLD if on else BG3))
+        painter.drawRect(x, y, 12, 12)
+        if self.state == Qt.CheckState.PartiallyChecked:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(GOLD))
+            painter.drawRect(x + 3, y + 3, 7, 7)
+        painter.restore()
+
+    def mousePressEvent(self, e):
+        if self.logicalIndexAt(e.position().toPoint()) == COL_CHECK:
+            self.toggled.emit(self.state != Qt.CheckState.Checked)
+            return
+        super().mousePressEvent(e)
+
+
 def icon_button(name, tip, slot):
     """32x32 flat icon button like morokoshi's _mk_icon_btn (yellow while pressed)."""
-    b = QPushButton()
-    b.setToolTip(tip)
+    b = TipButton(tip)
     b.setIcon(get_icon(name, 28, FG))
     b.setIconSize(QSize(28, 28))
     b.setFixedSize(32, 32)
@@ -421,11 +559,11 @@ class MainWindow(QMainWindow):
         row.addWidget(QLabel("NSF ファイル:"))
         self.ed_file = QLineEdit()
         self.ed_file.setReadOnly(True)
-        self.ed_file.setPlaceholderText("「開く」またはウィンドウへドラッグ＆ドロップ")
+        self.ed_file.setPlaceholderText("開くボタン（右クリックで履歴）またはウィンドウへドラッグ＆ドロップ")
         row.addWidget(self.ed_file, 1)
-        b = QPushButton("開く...")
-        b.clicked.connect(self.on_open)
-        row.addWidget(b)
+        self.bt_open = icon_button("open", "開く [O]\n右クリック: 履歴", self.on_open)
+        self.bt_open.on_right = self.show_history
+        row.addWidget(self.bt_open)
         root.addLayout(row)
 
         self.lb_info = QLabel("")
@@ -444,6 +582,9 @@ class MainWindow(QMainWindow):
         tr_box = QGroupBox("曲（チェックした曲を変換。変換後にダブルクリックで MIDI を開く）")
         tr_l = QVBoxLayout(tr_box)
         self.table = QTableWidget(0, 5)
+        self.check_header = CheckHeader(self.table)
+        self.check_header.toggled.connect(lambda on: self.set_checks("all" if on else "none"))
+        self.table.setHorizontalHeader(self.check_header)
         self.table.setHorizontalHeaderLabels(["", "No.", "曲名（m3u）", "長さ", "結果"])
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(COL_CHECK, QHeaderView.ResizeMode.ResizeToContents)
@@ -456,19 +597,12 @@ class MainWindow(QMainWindow):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.cellDoubleClicked.connect(self.on_row_double_clicked)
+        self.table.cellClicked.connect(self.on_row_clicked)
+        self.table.itemChanged.connect(self._update_check_header)
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
         tr_l.addWidget(self.table)
         tr_l.addLayout(self._build_player())
-        brow = QHBoxLayout()
-        for text, fn in (("すべて選択", lambda: self.set_checks("all")),
-                         ("m3u の曲を選択", lambda: self.set_checks("m3u")),
-                         ("すべて解除", lambda: self.set_checks("none"))):
-            b = QPushButton(text)
-            b.clicked.connect(fn)
-            brow.addWidget(b)
-        brow.addStretch(1)
-        tr_l.addLayout(brow)
         top_l.addWidget(tr_box, 3)
 
         top_l.addWidget(self._build_options(), 2)
@@ -479,7 +613,8 @@ class MainWindow(QMainWindow):
         log_l = QVBoxLayout(log_box)
         log_l.setContentsMargins(0, 0, 0, 0)
         crow = QHBoxLayout()
-        self.bt_convert = QPushButton("変換")
+        self.bt_convert = TipButton("変換 [Enter]\nチェックした曲を MIDI に変換")
+        self.bt_convert.setText("変換")
         self.bt_convert.setMinimumHeight(32)
         self.bt_convert.clicked.connect(self.on_convert)
         self.bt_stop = QPushButton("中止")
@@ -503,18 +638,36 @@ class MainWindow(QMainWindow):
         split.setSizes([420, 300])
 
         self._apply_settings()
+        for key, fn in (("O", self.on_open), ("Space", self.on_play_pause),
+                        ("Left", lambda: self.on_step_track(-1)), ("Right", lambda: self.on_step_track(1)),
+                        ("Escape", self.on_to_start), ("Return", self.on_convert), ("Enter", self.on_convert)):
+            QShortcut(QKeySequence(key), self, fn)
         if initial:
             self.load_nsf(initial)
+
+    # ------------------------------------------------------------ history
+
+    def show_history(self):
+        popup = FileHistoryPopup([p for p in self.settings.get("history", []) if os.path.exists(p)], self)
+        popup.file_selected.connect(self.load_nsf)
+        gp = self.bt_open.mapToGlobal(self.bt_open.rect().bottomLeft())
+        popup.move(gp.x(), gp.y() + 4)
+        popup.adjustSize()
+        popup.show()
+
+    def _add_history(self, path):
+        h = [p for p in self.settings.get("history", []) if os.path.normcase(p) != os.path.normcase(path)]
+        self.settings["history"] = ([path] + h)[:HISTORY_MAX]
 
     # ------------------------------------------------------------ playback
 
     def _build_player(self):
         row = QHBoxLayout()
         row.setSpacing(4)
-        self.bt_start = icon_button("to_start", "曲頭に戻る", self.on_to_start)
-        self.bt_prev = icon_button("prev", "前の曲", lambda: self.on_step_track(-1))
-        self.bt_play = icon_button("play_pause", "再生 / 一時停止（選択中の曲）", self.on_play_pause)
-        self.bt_next = icon_button("next", "次の曲", lambda: self.on_step_track(1))
+        self.bt_start = icon_button("to_start", "曲頭に戻る [Esc]", self.on_to_start)
+        self.bt_prev = icon_button("prev", "前の曲 [←]", lambda: self.on_step_track(-1))
+        self.bt_play = icon_button("play_pause", "再生 / 一時停止 [Space]\n選択中の曲を再生", self.on_play_pause)
+        self.bt_next = icon_button("next", "次の曲 [→]", lambda: self.on_step_track(1))
         self.lb_pos = QLabel(fmt_time(0))
         self.lb_pos.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lb_pos.setFixedSize(72, 22)
@@ -569,6 +722,15 @@ class MainWindow(QMainWindow):
             self.player.play()
         else:
             self.player.toggle()
+        self.play_timer.start()
+        self._update_play()
+
+    def on_row_clicked(self, row, col):
+        """While playing, clicking a track plays it from the start (the check column only checks)."""
+        if col == COL_CHECK or not self.player.playing:
+            return
+        if self._load_track(self.table.item(row, COL_CHECK).data(Qt.ItemDataRole.UserRole)):
+            self.player.play()
         self.play_timer.start()
         self._update_play()
 
@@ -701,7 +863,7 @@ class MainWindow(QMainWindow):
     DEFAULTS = {"loops": 1, "seconds": 600, "rows": "auto", "time_sig": "", "triplets": "auto",
                 "drum_map": "", "no_loop": False, "keep_tail": False,
                 "no_quantize": False, "no_tri_drums": False, "dump": False, "outdir": "",
-                "last_dir": "", "geometry": None}
+                "last_dir": "", "history": [], "geometry": None}
 
     def _load_settings(self):
         s = dict(self.DEFAULTS)
@@ -789,6 +951,7 @@ class MainWindow(QMainWindow):
         self.header = hdr
         self.outputs = {}
         self.settings["last_dir"] = os.path.dirname(self.nsf_path)
+        self._add_history(self.nsf_path)
         self.ed_file.setText(self.nsf_path)
         info = f"<b>{_esc(hdr.title)}</b>　{_esc(hdr.artist)}　{_esc(hdr.copyright)}　" \
                f"曲数 {hdr.total_songs}（開始 {hdr.start_song}）　{'PAL' if hdr.is_pal else 'NTSC'}"
@@ -817,15 +980,26 @@ class MainWindow(QMainWindow):
             self.table.setItem(i, COL_RESULT, QTableWidgetItem(""))
         if rows:
             self.table.setCurrentCell(0, COL_NO)
+        self._update_check_header()
         self.progress.setValue(0)
         self.append_log(f"Loaded: {self.nsf_path}" + (f" (playlist: {len(playlist)} tracks)" if playlist else ""))
 
     def set_checks(self, mode):
+        """mode: "all" or "none" (check-all box in the header)."""
+        self.table.blockSignals(True)
         for i in range(self.table.rowCount()):
-            it = self.table.item(i, COL_CHECK)
-            no = it.data(Qt.ItemDataRole.UserRole)
-            on = mode == "all" or (mode == "m3u" and no in self.m3u_tracks)
-            it.setCheckState(Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+            self.table.item(i, COL_CHECK).setCheckState(
+                Qt.CheckState.Checked if mode == "all" else Qt.CheckState.Unchecked)
+        self.table.blockSignals(False)
+        self.table.viewport().update()
+        self._update_check_header()
+
+    def _update_check_header(self, *_):
+        n = self.table.rowCount()
+        on = sum(1 for i in range(n) if self.table.item(i, COL_CHECK)
+                 and self.table.item(i, COL_CHECK).checkState() == Qt.CheckState.Checked)
+        self.check_header.set_state(Qt.CheckState.Checked if n and on == n else
+                                    Qt.CheckState.PartiallyChecked if on else Qt.CheckState.Unchecked)
 
     def _row_of(self, track):
         for i in range(self.table.rowCount()):
