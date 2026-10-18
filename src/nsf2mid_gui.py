@@ -53,6 +53,7 @@ from nsf import NSFHeader, read_nsf_bytes, zip_contents  # noqa: E402
 from player import NsfPlayer  # noqa: E402
 
 SETTINGS_PATH = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "nsf2mid", "settings.json")
+TRIPLETS = {"自動検出": "auto", "常にオン": "on", "常にオフ": "off"}   # --triplets
 ROWS_PER_BEAT = ("auto", "2", "3", "4", "6", "8", "9", "12", "16", "24")
 
 COL_CHECK, COL_NO, COL_TITLE, COL_LEN, COL_RESULT = range(5)
@@ -113,7 +114,7 @@ _ICON_CACHE = {}
 
 
 def get_icon(name, size, color):
-    """Icon tinted with color. play_pause is morokoshi's image; to_start is drawn here."""
+    """Icon tinted with color. play_pause is morokoshi's image; to_start / prev / next are drawn here."""
     key = (name, size, color)
     if key in _ICON_CACHE:
         return _ICON_CACHE[key]
@@ -129,6 +130,21 @@ def get_icon(name, size, color):
         p.drawPolygon(QPolygonF([QPointF(122, 38), QPointF(122, 112), QPointF(52, 75)]))
         p.end()
         img = pm.toImage()
+    elif name in ("prev", "next"):
+        # |<< / >>| : bar and two triangles in the same proportions as to_start
+        pm = QPixmap(150, 150)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(color))
+        p.drawRoundedRect(16, 38, 18, 74, 6, 6)
+        p.drawPolygon(QPolygonF([QPointF(84, 38), QPointF(84, 112), QPointF(38, 75)]))
+        p.drawPolygon(QPolygonF([QPointF(134, 38), QPointF(134, 112), QPointF(88, 75)]))
+        p.end()
+        img = pm.toImage()
+        if name == "next":
+            img = img.mirrored(True, False)
     else:
         # replace RGB, keep alpha (morokoshi's _tint_qimage)
         img = QImage(os.path.join(ICON_DIR, f"{name}.png")).convertToFormat(QImage.Format.Format_ARGB32)
@@ -496,7 +512,9 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         row.setSpacing(4)
         self.bt_start = icon_button("to_start", "曲頭に戻る", self.on_to_start)
+        self.bt_prev = icon_button("prev", "前の曲", lambda: self.on_step_track(-1))
         self.bt_play = icon_button("play_pause", "再生 / 一時停止（選択中の曲）", self.on_play_pause)
+        self.bt_next = icon_button("next", "次の曲", lambda: self.on_step_track(1))
         self.lb_pos = QLabel(fmt_time(0))
         self.lb_pos.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lb_pos.setFixedSize(72, 22)
@@ -504,13 +522,15 @@ class MainWindow(QMainWindow):
         self.lb_playing = QLabel("")
         self.lb_playing.setStyleSheet(f"color:{FG2};")
         row.addWidget(self.bt_start)
+        row.addWidget(self.bt_prev)
         row.addWidget(self.bt_play)
+        row.addWidget(self.bt_next)
         row.addWidget(self.lb_pos)
         row.addSpacing(6)
         row.addWidget(self.lb_playing, 1)
         if not self.player.available:
-            self.bt_start.setEnabled(False)
-            self.bt_play.setEnabled(False)
+            for b in (self.bt_start, self.bt_prev, self.bt_play, self.bt_next):
+                b.setEnabled(False)
             self.lb_playing.setText("再生不可（libgme.dll が見つかりません）")
         return row
 
@@ -551,6 +571,23 @@ class MainWindow(QMainWindow):
             self.player.toggle()
         self.play_timer.start()
         self._update_play()
+
+    def on_step_track(self, step):
+        """Move the selection to the next / previous row; while playing, play that track from the start."""
+        if not self.nsf_path or not self.table.rowCount():
+            return
+        cur = self.table.currentRow()
+        if cur < 0:
+            cur = 0
+        i = cur + step
+        if not 0 <= i < self.table.rowCount():
+            return
+        self.table.setCurrentCell(i, self.table.currentColumn() if self.table.currentColumn() >= 0 else COL_NO)
+        if self.player.playing:
+            if self._load_track(self._selected_track()):
+                self.player.play()
+            self.play_timer.start()
+            self._update_play()
 
     def on_to_start(self):
         if not self.nsf_path:
@@ -612,9 +649,9 @@ class MainWindow(QMainWindow):
         self.cb_rows = add("1 拍の行数", QComboBox(), "1 拍あたりの行数（--rows-per-beat）。auto = 自動検出。テンポが倍/半分になる場合に指定")
         self.cb_rows.addItems(ROWS_PER_BEAT)
         self.ed_timesig = add("拍子", QLineEdit(), '区間ごとの拍子（--time-sig）。例 "6/8,4/4"、"-" = 自動。空欄 = 自動')
-        self.sp_tri_oct = add("三角波オクターブ", QSpinBox(), "三角波の出力オクターブ移動（--tri-octave）。0 = APU の物理的な音高")
-        self.sp_tri_oct.setRange(-3, 3)
-        self.ed_programs = add("音色", QLineEdit(), 'P1,P2,TRI の GM 音色番号（--programs）。例 "80,80,38"。空欄 = 音色を出力しない')
+        self.cb_triplets = add("3連符を優先して検出", QComboBox(),
+                               "3 連ノリの曲を 1 拍 = 3 音で出力するか（--triplets）。自動検出 / 常にオン / 常にオフ")
+        self.cb_triplets.addItems(list(TRIPLETS))
         self.ed_drummap = add("ドラム割当", QLineEdit(), 'ドラム割当の上書き（--drum-map）。例 "3:0=42,12:0=36,DMC:E000:129:15=38"')
         self.ck_noloop = check("ループ検出をしない", "最大秒数をそのまま変換（--no-loop）")
         self.ck_tail = check("リバーブ余韻を残す", "余韻もノート長に含める（--keep-tail）")
@@ -646,10 +683,8 @@ class MainWindow(QMainWindow):
             a += ["--rows-per-beat", self.cb_rows.currentText()]
         if self.ed_timesig.text().strip():
             a += ["--time-sig", self.ed_timesig.text().strip()]
-        if self.sp_tri_oct.value():
-            a += ["--tri-octave", str(self.sp_tri_oct.value())]
-        if self.ed_programs.text().strip():
-            a += ["--programs", self.ed_programs.text().strip()]
+        if TRIPLETS[self.cb_triplets.currentText()] != "auto":
+            a += ["--triplets", TRIPLETS[self.cb_triplets.currentText()]]
         if self.ed_drummap.text().strip():
             a += ["--drum-map", self.ed_drummap.text().strip()]
         for c, flag in ((self.ck_noloop, "--no-loop"), (self.ck_tail, "--keep-tail"),
@@ -663,8 +698,8 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ settings
 
-    DEFAULTS = {"loops": 1, "seconds": 600, "rows": "auto", "time_sig": "", "tri_octave": 0,
-                "programs": "", "drum_map": "", "no_loop": False, "keep_tail": False,
+    DEFAULTS = {"loops": 1, "seconds": 600, "rows": "auto", "time_sig": "", "triplets": "auto",
+                "drum_map": "", "no_loop": False, "keep_tail": False,
                 "no_quantize": False, "no_tri_drums": False, "dump": False, "outdir": "",
                 "last_dir": "", "geometry": None}
 
@@ -684,8 +719,8 @@ class MainWindow(QMainWindow):
         i = self.cb_rows.findText(str(s["rows"]))
         self.cb_rows.setCurrentIndex(max(0, i))
         self.ed_timesig.setText(s["time_sig"])
-        self.sp_tri_oct.setValue(int(s["tri_octave"]))
-        self.ed_programs.setText(s["programs"])
+        mode = s["triplets"] if s["triplets"] in TRIPLETS.values() else "auto"
+        self.cb_triplets.setCurrentText(next(k for k, v in TRIPLETS.items() if v == mode))
         self.ed_drummap.setText(s["drum_map"])
         self.ck_noloop.setChecked(bool(s["no_loop"]))
         self.ck_tail.setChecked(bool(s["keep_tail"]))
@@ -701,10 +736,10 @@ class MainWindow(QMainWindow):
 
     def _save_settings(self):
         g = self.geometry()
-        s = dict(self.settings)
+        s = {k: v for k, v in self.settings.items() if k not in ("tri_octave", "programs")}
         s.update({"loops": self.sp_loops.value(), "seconds": self.sp_seconds.value(),
                   "rows": self.cb_rows.currentText(), "time_sig": self.ed_timesig.text(),
-                  "tri_octave": self.sp_tri_oct.value(), "programs": self.ed_programs.text(),
+                  "triplets": TRIPLETS[self.cb_triplets.currentText()],
                   "drum_map": self.ed_drummap.text(), "no_loop": self.ck_noloop.isChecked(),
                   "keep_tail": self.ck_tail.isChecked(), "no_quantize": self.ck_noquant.isChecked(),
                   "no_tri_drums": self.ck_notridrums.isChecked(), "dump": self.ck_dump.isChecked(),
@@ -780,6 +815,8 @@ class MainWindow(QMainWindow):
             self.table.setItem(i, COL_TITLE, QTableWidgetItem(title))
             self.table.setItem(i, COL_LEN, QTableWidgetItem(length))
             self.table.setItem(i, COL_RESULT, QTableWidgetItem(""))
+        if rows:
+            self.table.setCurrentCell(0, COL_NO)
         self.progress.setValue(0)
         self.append_log(f"Loaded: {self.nsf_path}" + (f" (playlist: {len(playlist)} tracks)" if playlist else ""))
 

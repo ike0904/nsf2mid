@@ -1,5 +1,7 @@
 """
 Simple NSF player for the GUI (play/pause and back to start only).
+Plays the selected track only: a track that ends (stays silent for SILENCE_STOP_SEC after it
+has made sound) stops there; looping tracks play on.
 
 Uses libgme (src/dll/libgme.dll, the same build as morokoshi) through ctypes and streams
 its output to sounddevice. The emulator is run directly in the audio callback, so there is
@@ -17,6 +19,8 @@ import sounddevice as sd
 from nsf import read_nsf_bytes
 
 SR = 44100
+SILENCE_STOP_SEC = 5.0     # a track that has played and then stays silent this long has ended
+SILENCE_LEVEL = 64         # peak (16-bit, DC removed) below this counts as silence
 
 _lib = None
 
@@ -69,6 +73,9 @@ class NsfPlayer:
         self.track = None          # 1-based
         self.playing = False
         self.samples = 0           # samples played since the start of the track
+        self.ended = False         # stopped because the track ended
+        self._heard = False
+        self._silent = 0           # samples of silence since the last sound
         self.error = ""
         self._stream = None
         self._lock = threading.Lock()
@@ -107,6 +114,9 @@ class NsfPlayer:
                 return False
             self.lib.gme_clear_blip_buffer(self.emu)   # drop the INIT click at the start
             self.samples = 0
+            self.ended = False
+            self._heard = False
+            self._silent = 0
         return True
 
     def play(self):
@@ -131,7 +141,7 @@ class NsfPlayer:
         if self.playing:
             self.pause()
         else:
-            if self.emu and self.lib.gme_track_ended(self.emu):
+            if self.emu and (self.ended or self.lib.gme_track_ended(self.emu)):
                 self._start_track()
             self.play()
 
@@ -163,7 +173,17 @@ class NsfPlayer:
             err = self.lib.gme_play(self.emu, frames * 2, buf)
             ended = err is not None or self.lib.gme_track_ended(self.emu)
             self.samples += frames
-        outdata[:] = np.frombuffer(buf, dtype=np.int16).reshape(frames, 2) / 32768.0
+            pcm = np.frombuffer(buf, dtype=np.int16).reshape(frames, 2)
+            if np.ptp(pcm) >= 2 * SILENCE_LEVEL:
+                self._heard = True
+                self._silent = 0
+            elif self._heard:
+                self._silent += frames
+                if self._silent >= SILENCE_STOP_SEC * SR:
+                    ended = True
+            if ended:
+                self.ended = True
+        outdata[:] = pcm / 32768.0
         if ended:
             # stopping the stream from its own callback is not allowed; the GUI timer closes it
             self.playing = False

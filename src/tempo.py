@@ -136,6 +136,48 @@ def shuffle_step(onsets, unit):
     return best_s if best >= SHUFFLE_PAIRS else None
 
 
+TRIPLET_REP_GAIN = 0.15   # pitches repeat after 3 notes clearly more often than after 4 ...
+TRIPLET_FIT_GAIN = 0.05   # ... and the notes line up on a 3-note beat better than on a 4-note beat
+
+
+def triplet_note(channel_notes, force=False):
+    """Triplet feel written as plain notes: the most common note interval d is a triplet 8th
+    (1 beat = 3d). Looks at each channel separately, because merged onsets of a 2:1 bass and a
+    triplet melody form an even grid. Returns d (frames) or None.
+
+    Examples: The Legend of Zelda overworld - bass 24,8,8,8 frames with 16ths (6 frames) in the
+    melody (grid 2 frames), Clu Clu Land t3 - 16,8 bass under triplet runs (grid 8 frames).
+    channel_notes: {ch: {start frame: pitch}}. force=True returns d without the check.
+    """
+    chans = [c for c in channel_notes.values() if len(c) >= 16]
+    iois = Counter()
+    for c in chans:
+        st = sorted(c)
+        iois.update(b - a for a, b in zip(st, st[1:]) if b - a >= 4)
+    if not iois:
+        return None
+    d = iois.most_common(1)[0][0]
+    if force:
+        return d
+    rep, fit = {}, {}
+    for k in (3, 4):
+        period = k * d
+        hit = tot = 0
+        fits = []
+        for c in chans:
+            for f, p in c.items():
+                tot += 1
+                # the same pitch one or two periods later (within a frame)
+                if any(c.get(f + m * period + e) == p for m in (1, 2) for e in (-1, 0, 1)):
+                    hit += 1
+            fits.append(beat_fit(sorted(c), period, tol=1.0)[0])
+        rep[k] = hit / tot
+        fit[k] = sum(fits) / len(fits)
+    if rep[3] - rep[4] >= TRIPLET_REP_GAIN and fit[3] - fit[4] >= TRIPLET_FIT_GAIN:
+        return d
+    return None
+
+
 def choose_rows(unit, frame_rate, ternary, prefer_bpm=None, onsets=None):
     family = (12, 6, 3, 24) if ternary else (4, 2, 8, 16)
     if prefer_bpm:
@@ -190,7 +232,8 @@ class Segment:
         return f"Segment(start={self.start}, unit={self.unit:.4g}, bpm={self.bpm:.2f}, fit={self.score:.2f})"
 
 
-def detect_tempo_map(onsets, frame_rate, rows_per_beat=None, unit=None):
+def detect_tempo_map(onsets, frame_rate, rows_per_beat=None, unit=None, channel_notes=None, triplets="auto"):
+    """triplets: "auto" (detect), "on" (always triplet feel) or "off" (always binary)."""
     onsets = sorted(set(onsets))
     if len(onsets) < 4:
         return None
@@ -206,10 +249,23 @@ def detect_tempo_map(onsets, frame_rate, rows_per_beat=None, unit=None):
     shuffle = step is not None
     if shuffle:
         ternary = True
+    trip_d = None
+    if triplets == "off":
+        ternary, shuffle = False, False
+    elif not rows_per_beat and not ternary:
+        trip_d = triplet_note(channel_notes or {}, force=triplets == "on")
+        ternary = bool(trip_d) or triplets == "on"
     prev = None
     for s in segs:
         if rows_per_beat:
             s.rows = rows_per_beat
+        elif trip_d and prev is None:
+            # 1 beat = 3 triplet notes; double / halve into a sane tempo
+            s.rows = max(1, round(3 * trip_d / s.unit))
+            while 60.0 * frame_rate / (s.unit * s.rows) >= 240.0:
+                s.rows *= 2
+            while s.rows % 2 == 0 and 60.0 * frame_rate / (s.unit * s.rows) < BPM_LO:
+                s.rows //= 2
         elif shuffle and prev is None:
             # 1 beat = one long-short pair (2s + s); double it if that would exceed 240 BPM
             s.rows = 3 * step if 60.0 * frame_rate / (s.unit * 3 * step) < 240.0 else 6 * step
@@ -217,7 +273,7 @@ def detect_tempo_map(onsets, frame_rate, rows_per_beat=None, unit=None):
             s.rows = choose_rows(s.unit, frame_rate, ternary, prev, onsets)
         s.bpm = 60.0 * frame_rate / (s.unit * s.rows)
         prev = s.bpm
-    return {"global": g, "segments": segs, "ternary": ternary, "shuffle": shuffle}
+    return {"global": g, "segments": segs, "ternary": ternary, "shuffle": shuffle, "triplet": bool(trip_d)}
 
 
 def _segment(onsets, frame_rate, g):

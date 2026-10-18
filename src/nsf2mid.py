@@ -10,7 +10,7 @@ Usage:
     python nsf2mid.py                (GUI)
     python nsf2mid.py FILE.nsf|FILE.zip [-t TRACK] [-s SECONDS] [-o OUTDIR] [--info] [--dump]
                       [--keep-tail] [--no-quantize] [--unit FRAMES] [--rows-per-beat N]
-                      [--loops N] [--no-loop] [--no-tri-drums] [--drum-map MAP]
+                      [--loops N] [--no-loop] [--no-tri-drums] [--drum-map MAP] [--triplets auto|on|off]
 
 バージョン履歴:
   v0.1.0 (2026-10-04) - 初版 (Phase 1: 6502 エミュレータ・APU レジスタログ・フレーム状態ダンプ)
@@ -28,9 +28,10 @@ Usage:
   v0.1.12 (2026-10-05) - Phase 4: GUI (nsf2mid_gui.py、引数なしで起動)・変換処理を convert() に分離 (中止対応)
   v0.1.13 (2026-10-08) - GUI の見た目を morokoshi に合わせる・簡易再生 (libgme)
   v0.1.14 (2026-10-18) - NSF 入りの zip (zophar.net 形式) を直接読み込み (CLI・GUI・m3u・再生)
+  v0.1.15 (2026-10-18) - 3 連ノリ検出 (チャンネル別の 3 音/4 音周期比較、--triplets)・GUI: 三角波オクターブ/音色を削除、前後の曲ボタン、終わった曲で停止
 """
 
-APP_VERSION = "v0.1.14"
+APP_VERSION = "v0.1.15"
 
 import argparse
 import csv
@@ -340,6 +341,8 @@ def build_parser():
     ap.add_argument("--programs", default="",
                     help='GM programs (0-based) for P1,P2,TRI, e.g. "80,80,38"; "-" = no program change '
                          '(default: none)')
+    ap.add_argument("--triplets", choices=("auto", "on", "off"), default="auto",
+                    help="prefer triplet feel: auto = detect (default), on = always, off = never (binary)")
     ap.add_argument("--no-tri-drums", action="store_true", help="keep triangle glide drums as triangle notes")
     ap.add_argument("--drum-map", default="",
                     help='override drum notes, e.g. "3:0=42,12:0=36,DMC:E000:129:15=38" '
@@ -453,14 +456,16 @@ def convert(args, should_stop=None):
 
     onsets = [o for o in tempo_onsets(notes, frames) if o < end_frame]
     onsets += [d.start for d in in_range if d.src == "DMC"]
-    tempo = detect_tempo_map(onsets, frame_rate, args.rows_per_beat, args.unit)
+    chan_notes = {ch: {n.start: n.pitch for n in notes[ch] if n.start < end_frame and not n.cue.startswith("pitch")}
+                  for ch in ("P1", "P2", "TRI")}
+    tempo = detect_tempo_map(onsets, frame_rate, args.rows_per_beat, args.unit, chan_notes, args.triplets)
     tmap = None
     if tempo is None:
         print("\nTempo: not enough notes to detect")
     else:
         g = tempo["global"]
         print(f"\nTempo: grid unit {g['unit']:g} frames (fit {g['score'] * 100:.1f}%), "
-              f"{'shuffle (long-short on a straight grid)' if tempo.get('shuffle') else 'ternary (triplet/shuffle)' if tempo['ternary'] else 'binary'}")
+              f"{'shuffle (long-short on a straight grid)' if tempo.get('shuffle') else 'triplet feel (3 notes per beat)' if tempo.get('triplet') else 'ternary (triplet/shuffle)' if tempo['ternary'] else 'binary'}")
         meters = [tuple(int(x) for x in m.split("/")) if m.strip() not in ("", "-") else None
                   for m in args.time_sig.split(",")] if args.time_sig else None
         tmap = TickMap(tempo, PPQ, not args.no_quantize, frame_rate, onsets,
