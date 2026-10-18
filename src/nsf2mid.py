@@ -8,7 +8,7 @@ Phase 4: GUI (nsf2mid_gui.py). Started when no arguments are given.
 
 Usage:
     python nsf2mid.py                (GUI)
-    python nsf2mid.py FILE.nsf [-t TRACK] [-s SECONDS] [-o OUTDIR] [--info] [--dump]
+    python nsf2mid.py FILE.nsf|FILE.zip [-t TRACK] [-s SECONDS] [-o OUTDIR] [--info] [--dump]
                       [--keep-tail] [--no-quantize] [--unit FRAMES] [--rows-per-beat N]
                       [--loops N] [--no-loop] [--no-tri-drums] [--drum-map MAP]
 
@@ -26,9 +26,11 @@ Usage:
   v0.1.10 (2026-10-04) - シャッフル (長短 2:1 の交互) 検出 (マリオ3: 200 BPM 3 連)・ベースライン拍判定は廃止
   v0.1.11 (2026-10-04) - 拍子検出 (6/8・4/4)・リタルダンド/フェルマータ追従・区間境目のフレーズ優先・3 連系の拍選択 (マリオ 200 BPM)
   v0.1.12 (2026-10-05) - Phase 4: GUI (nsf2mid_gui.py、引数なしで起動)・変換処理を convert() に分離 (中止対応)
+  v0.1.13 (2026-10-08) - GUI の見た目を morokoshi に合わせる・簡易再生 (libgme)
+  v0.1.14 (2026-10-18) - NSF 入りの zip (zophar.net 形式) を直接読み込み (CLI・GUI・m3u・再生)
 """
 
-APP_VERSION = "v0.1.13"
+APP_VERSION = "v0.1.14"
 
 import argparse
 import csv
@@ -38,7 +40,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from nsf import NSFPlayer  # noqa: E402
+from nsf import NSFPlayer, nsf_base_name  # noqa: E402
 from apu_state import APUState, note_name  # noqa: E402
 from notes import extract_notes, tempo_onsets  # noqa: E402
 from tempo import detect_tempo_map, TickMap  # noqa: E402
@@ -318,7 +320,7 @@ class Cancelled(Exception):
 
 def build_parser():
     ap = argparse.ArgumentParser(description=f"nsf2mid {APP_VERSION} - NSF to MIDI converter")
-    ap.add_argument("nsf", help="input .nsf file")
+    ap.add_argument("nsf", help="input .nsf file, or a zip containing one (zophar.net style)")
     ap.add_argument("-t", "--track", type=int, default=0, help="track number (1-based, default: start song)")
     ap.add_argument("-s", "--seconds", type=float, default=600.0,
                     help="maximum length to emulate in seconds (stops early when a loop or the end is found)")
@@ -423,7 +425,7 @@ def convert(args, should_stop=None):
 
     outdir = args.outdir or os.path.join(os.path.dirname(os.path.abspath(args.nsf)), "nsf2mid_out")
     os.makedirs(outdir, exist_ok=True)
-    base = os.path.splitext(os.path.basename(args.nsf))[0]
+    base = nsf_base_name(args.nsf)
     if len(base) > 40:
         base = base[:40].rstrip()
     stem = os.path.join(outdir, f"{base}_t{track:02d}")

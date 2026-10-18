@@ -5,7 +5,9 @@ The player runs INIT once and then calls PLAY at the rate given in the header,
 recording every APU register write together with its CPU-cycle timestamp.
 """
 
+import os
 import struct
+import zipfile
 
 from cpu6502 import CPU6502
 from apu_state import APUState
@@ -25,6 +27,46 @@ EXPANSION_NAMES = [
 # Sentinel address used as the return address for INIT / PLAY calls.
 # Placed in the unmapped $5xxx area (not used by 2A03-only NSFs).
 SENTINEL = 0x5FF0
+
+
+def is_nsf_zip(path):
+    return path.lower().endswith(".zip") and zipfile.is_zipfile(path)
+
+
+def _zip_nsf_member(z):
+    names = [n for n in z.namelist() if n.lower().endswith(".nsf")]
+    if not names:
+        raise ValueError("no .nsf file in the zip")
+    return names[0]
+
+
+def read_nsf_bytes(path):
+    """Return the NSF data of a .nsf file or of a zip holding one (zophar.net style)."""
+    if is_nsf_zip(path):
+        with zipfile.ZipFile(path) as z:
+            return z.read(_zip_nsf_member(z))
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def zip_contents(path):
+    """For a zip: (inner .nsf name, {.m3u name: bytes}). For a plain .nsf: (None, {})."""
+    if not is_nsf_zip(path):
+        return None, {}
+    with zipfile.ZipFile(path) as z:
+        m3u = {n: z.read(n) for n in z.namelist() if n.lower().endswith(".m3u")}
+        return _zip_nsf_member(z), m3u
+
+
+def nsf_base_name(path):
+    """Base name for output files: "Foo (EMU).zophar.zip" -> "Foo (EMU)", "bar.nsf" -> "bar"."""
+    base = os.path.basename(path)
+    if base.lower().endswith(".zip"):
+        base = base[:-4]
+        if base.lower().endswith(".zophar"):
+            base = base[:-7]
+        return base
+    return os.path.splitext(base)[0]
 
 
 class NSFHeader:
@@ -144,8 +186,7 @@ class NSFBus:
 
 class NSFPlayer:
     def __init__(self, path):
-        with open(path, "rb") as f:
-            data = f.read()
+        data = read_nsf_bytes(path)
         self.header = NSFHeader(data)
         self.rom = data[0x80:]
         self.writes = []          # (cpu_cycle, addr, value)

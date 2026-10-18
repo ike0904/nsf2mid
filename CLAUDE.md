@@ -9,7 +9,7 @@
 このプロジェクトは morokoshi フォルダで起動した会話の中で作成した。以下はその会話からの引き継ぎ。
 
 ### 現状
-- Phase 1〜4 完了（v0.1.13）。Phase 4（GUI）は初版＋簡易再生。ユーザーは MIDI の品質調整も継続中
+- Phase 1〜4 完了（v0.1.14）。Phase 4（GUI）は初版＋簡易再生。ユーザーは MIDI の品質調整も継続中
 - 起動は `openClaude.bat`。GitHub: https://github.com/ike0904/nsf2mid（公開）
 
 ### ユーザー確認待ち
@@ -39,7 +39,14 @@
 
 ## 作業記録
 
-### v0.1.13 (2026-10-08) ← 最新
+### v0.1.14 (2026-10-18) ← 最新
+- NSF 入りの zip（zophar.net 形式）を直接読めるようにした（プロンプト指示）
+  - src/nsf.py: read_nsf_bytes / zip_contents / nsf_base_name を追加。CLI・GUI（開く・ドロップ）・簡易再生・m3u 読み込みが zip 対応
+  - m3u は zip 内のものを使用。出力名は zip 名から .zophar.zip を除いたもの
+  - 動作確認: Clu Clu Land (EMU).zophar.zip を CLI 変換（112 BPM）、1943 の zip で GUI に m3u 曲名 45 曲表示、zip から再生ロード成功
+  - 変換ロジックは不変（DQ2 t01 の MIDI が nsf2mid_out とバイト一致）のため regress.py・nsf2mid_out の作り直しは実施せず
+
+### v0.1.13 (2026-10-08)
 - GUI の見た目を morokoshi に合わせた（プロンプト指示。今後も同様）
   - 配色（BG #2B2B2B / BG2 #3C3F41 / BG3 #4C5052 / FG #BBBBBB / 枠 #555555）、Consolas、Fusion、押下中は黄色 #FFD700
   - 表・グループ枠・スピンボックス・コンボ・チェックボックス・進捗バーも同じ配色に（矢印は src/icon/*.svg）

@@ -84,6 +84,12 @@ python src/nsf2mid.py FILE.nsf [-t TRACK] [-s SECONDS] [-o OUTDIR] [--info] [--d
 - `d` = duty 比変化 / `p` = 上位レジスタ書き込みなしの周期変化 / `~` = 平均律から 20 セント超ずれ
 - 実効音量 0 でも `*` があれば `v0` 付きで表示
 
+## 入力ファイル（v0.1.14）
+
+- `.nsf` のほか、NSF が入った zip（zophar.net 形式 `Foo (EMU).zophar.zip`）を直接指定できる（CLI・GUI・簡易再生とも）
+  - zip 内の最初の `.nsf` を使う。曲一覧の m3u は zip 内の `.m3u` から読む
+  - 出力ファイル名は zip 名から `.zip` / `.zophar` を除いたもの（例: `Clu Clu Land (EMU)_t01.mid`）、出力先は zip と同じフォルダの `nsf2mid_out`
+
 ## Phase 4 GUI（v0.1.12）
 
 起動: `nsf2mid.bat`（NSF をドロップしても可）、`python src/nsf2mid.py`（引数なし）、`python src/nsf2mid_gui.py [FILE.nsf]`

@@ -14,6 +14,8 @@ import threading
 import numpy as np
 import sounddevice as sd
 
+from nsf import read_nsf_bytes
+
 SR = 44100
 
 _lib = None
@@ -84,8 +86,7 @@ class NsfPlayer:
         if not self.lib:
             self.error = "libgme.dll not found"
             return False
-        with open(path, "rb") as f:
-            raw = f.read()
+        raw = read_nsf_bytes(path)
         self._raw = _ct.create_string_buffer(raw, len(raw))   # kept alive while the emulator lives
         emu = _ct.c_void_p()
         err = self.lib.gme_open_data(self._raw, len(raw), _ct.byref(emu), SR)

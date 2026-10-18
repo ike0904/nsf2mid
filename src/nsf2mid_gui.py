@@ -33,6 +33,7 @@ import json  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
 import traceback  # noqa: E402
+import zipfile  # noqa: E402
 
 import numpy as np  # noqa: E402
 
@@ -48,7 +49,7 @@ from PyQt6.QtWidgets import (  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import nsf2mid  # noqa: E402
-from nsf import NSFHeader  # noqa: E402
+from nsf import NSFHeader, read_nsf_bytes, zip_contents  # noqa: E402
 from player import NsfPlayer  # noqa: E402
 
 SETTINGS_PATH = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "nsf2mid", "settings.json")
@@ -186,8 +187,7 @@ def _split_m3u_fields(s):
     return out
 
 
-def _read_text(path):
-    data = open(path, "rb").read()
+def _decode_text(data):
     for enc in ("utf-8-sig", "cp932", "latin-1"):
         try:
             return data.decode(enc)
@@ -210,23 +210,39 @@ def _format_len(s):
     return f"{int(sec) // 60}:{int(sec) % 60:02d}"
 
 
-def read_m3u(nsf_path):
-    """Return [(track 1-based, title, length)] in playlist order from .m3u files next to the NSF."""
+def _m3u_sources(nsf_path):
+    """(NSF file name, {m3u name: bytes}): the m3u files inside a zip, or next to a plain NSF."""
+    inner, m3u = zip_contents(nsf_path)
+    if inner is not None:
+        return os.path.basename(inner), {os.path.basename(n): d for n, d in m3u.items()}
     folder = os.path.dirname(os.path.abspath(nsf_path))
-    base = os.path.basename(nsf_path).lower()
+    m3u = {}
+    try:
+        for name in os.listdir(folder):
+            if name.lower().endswith(".m3u"):
+                with open(os.path.join(folder, name), "rb") as f:
+                    m3u[name] = f.read()
+    except OSError:
+        pass
+    return os.path.basename(nsf_path), m3u
+
+
+def read_m3u(nsf_path):
+    """Return [(track 1-based, title, length)] in playlist order from .m3u files next to the NSF
+    (or inside the zip)."""
+    try:
+        nsf_name, m3u = _m3u_sources(nsf_path)
+    except (OSError, ValueError, zipfile.BadZipFile):
+        return []
+    base = nsf_name.lower()
     stem = os.path.splitext(base)[0]
     entries, seen = [], set()
-    try:
-        names = sorted(os.listdir(folder))
-    except OSError:
-        return entries
     # the playlist with the same name first
+    names = sorted(m3u)
     names.sort(key=lambda n: os.path.splitext(n.lower())[0] != stem)
     for name in names:
-        if not name.lower().endswith(".m3u"):
-            continue
         same_stem = os.path.splitext(name.lower())[0] == stem
-        for line in _read_text(os.path.join(folder, name)).splitlines():
+        for line in _decode_text(m3u[name]).splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "::" not in line:
                 continue
@@ -714,14 +730,14 @@ class MainWindow(QMainWindow):
     def dropEvent(self, e):
         for u in e.mimeData().urls():
             p = u.toLocalFile()
-            if p.lower().endswith(".nsf"):
+            if p.lower().endswith((".nsf", ".zip")):
                 self.load_nsf(p)
                 return
-        QMessageBox.warning(self, "nsf2mid", "NSF ファイル（.nsf）をドロップしてください。")
+        QMessageBox.warning(self, "nsf2mid", "NSF ファイル（.nsf / NSF 入りの .zip）をドロップしてください。")
 
     def on_open(self):
         p, _ = QFileDialog.getOpenFileName(self, "NSF ファイルを開く", self.settings.get("last_dir", ""),
-                                           "NSF (*.nsf);;All files (*)")
+                                           "NSF (*.nsf *.zip);;All files (*)")
         if p:
             self.load_nsf(p)
 
@@ -729,9 +745,8 @@ class MainWindow(QMainWindow):
         if self.worker:
             return
         try:
-            with open(path, "rb") as f:
-                hdr = NSFHeader(f.read(0x80))
-        except (OSError, ValueError) as e:
+            hdr = NSFHeader(read_nsf_bytes(path)[:0x80])
+        except (OSError, ValueError, zipfile.BadZipFile) as e:
             QMessageBox.warning(self, "nsf2mid", f"読み込めませんでした:\n{path}\n{e}")
             return
         self._stop_player()
