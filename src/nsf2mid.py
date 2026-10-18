@@ -29,9 +29,10 @@ Usage:
   v0.1.13 (2026-10-08) - GUI の見た目を morokoshi に合わせる・簡易再生 (libgme)
   v0.1.14 (2026-10-18) - NSF 入りの zip (zophar.net 形式) を直接読み込み (CLI・GUI・m3u・再生)
   v0.1.15 (2026-10-18) - 3 連ノリ検出 (チャンネル別の 3 音/4 音周期比較、--triplets)・GUI: 三角波オクターブ/音色を削除、前後の曲ボタン、終わった曲で停止
+  v0.1.16 (2026-10-18) - 簡易再生の「5 秒無音で停止」を廃止
 """
 
-APP_VERSION = "v0.1.15"
+APP_VERSION = "v0.1.16"
 
 import argparse
 import csv
